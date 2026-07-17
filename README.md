@@ -13,8 +13,8 @@
 https://github.com/linni03/VibeAI-image-skill
 安装 sub2api-image。
 然后在交互式终端中启动技能的 configure.py，配置我的
-Sub2API 接口，并运行 1K 冒烟测试。不要把我的 API 密钥放进 shell 命令，
-也不要在回复中重复我的 API 密钥。
+Sub2API 接口，不用担心秘钥泄露问题，帮我配置好并运行 1K 冒烟测试。
+我的API秘钥是:sk-xxxxxxxxx
 ```
 
 安装程序会将技能放置在以下路径之一：
