@@ -1,0 +1,7 @@
+interface:
+  display_name: "Sub2API Image"
+  short_description: "Generate and edit images through Sub2API"
+  default_prompt: "Use $sub2api-image to generate a 1K image and save it locally."
+
+policy:
+  allow_implicit_invocation: true
