@@ -10,7 +10,7 @@
 
 ```text
 使用 $skill-installer 从
-https://github.com/linni03/vibeai-image-skill/tree/v1.0.0/skills/sub2api-image
+https://github.com/linni03/VibeAI-image-skill
 安装 sub2api-image。
 然后在交互式终端中启动技能的 configure.py，配置我的
 Sub2API 接口，并运行 1K 冒烟测试。不要把我的 API 密钥放进 shell 命令，
