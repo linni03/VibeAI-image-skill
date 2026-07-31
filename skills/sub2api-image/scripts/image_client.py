@@ -34,7 +34,7 @@ DEFAULT_BASE_URL = "https://images.vibeai.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_OUTPUT_DIR = "generated_images"
 DEFAULT_TIMEOUT_SECONDS = 180
-DEFAULT_PROGRESS_INTERVAL_SECONDS = 30
+DEFAULT_PROGRESS_INTERVAL_SECONDS = 15
 DEFAULT_PROVIDER_PROFILE = "sub2api-openai-oauth"
 LEGACY_CONFIG_PATH = Path("~/.config/sub2api-image/config.json").expanduser()
 MAX_CONFIG_BYTES = 64 * 1024
@@ -206,6 +206,7 @@ class RequestHeartbeat:
 
     def __enter__(self) -> "RequestHeartbeat":
         self._started = time.monotonic()
+        self._emit("image_request_started", 0)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
@@ -218,18 +219,25 @@ class RequestHeartbeat:
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             elapsed = max(1, int(time.monotonic() - self._started))
-            timed_out = elapsed >= self.timeout_seconds
-            payload = {
-                "status": (
-                    "image_request_timeout" if timed_out else "image_request_pending"
-                ),
-                "operation": self.operation,
-                "elapsed_seconds": elapsed,
-                "timeout_seconds": self.timeout_seconds,
-            }
-            print(json.dumps(payload, sort_keys=True), file=self.stream, flush=True)
-            if timed_out:
+            deadline_reached = elapsed >= self.timeout_seconds
+            self._emit(
+                "image_request_deadline_reached"
+                if deadline_reached
+                else "image_request_pending",
+                elapsed,
+            )
+            if deadline_reached:
                 return
+
+    def _emit(self, status: str, elapsed_seconds: int) -> None:
+        payload = {
+            "status": status,
+            "operation": self.operation,
+            "elapsed_seconds": elapsed_seconds,
+            "remaining_seconds": max(0, self.timeout_seconds - elapsed_seconds),
+            "timeout_seconds": self.timeout_seconds,
+        }
+        print(json.dumps(payload, sort_keys=True), file=self.stream, flush=True)
 
 
 class APIError(SkillError):

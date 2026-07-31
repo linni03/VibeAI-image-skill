@@ -2,6 +2,8 @@
 
 这是一个供 Codex 使用的图像生成与编辑 Skill，默认针对 Sub2API `0.1.169` 的 OpenAI OAuth 图像账号桥接。安装并配置一次后，可以直接在 Codex 对话中描述图片需求，不需要手动调用接口或安装第三方 Python 包。
 
+![VibeAI Sub2API 图像 Skill 安装流程](docs/assets/vibeai-image-skill-tutorial.png)
+
 ## 安装前准备
 
 - 已安装并可以正常使用的 Codex
@@ -141,9 +143,11 @@ writable_roots = ['C:\Users\YOUR-NAME\Pictures']
 
 `sub2api-openai-oauth` profile 默认使用非流式 JSON，避免正常路径依赖 OAuth Responses 桥接的 partial/completed SSE 边界。已验证的预设为 `1K` 方形 `1024x1024`、`2K` 横向 `1536x1024`、`2K` 竖向 `1024x1536`。OAuth `1K` 横向/竖向、`2K` 方形和全部 `4K` preset 不会被猜测或静默替换，而会在联网前报错；只有明确知道后端接受某尺寸时才传精确 `--size WIDTHxHEIGHT`。返回文件仍按真实字节尺寸严格核验。
 
-正式生成和编辑固定使用 `--timeout 180`，最多等待 3 分钟。同步请求仍在执行时，客户端每 30 秒向标准错误输出一条不含 Key、提示词或文件路径的 `image_request_pending` 心跳；最终 JSON 报告继续单独写入标准输出。Codex 遇到 session ID、cell ID、`still running`、心跳或空输出时会继续等待同一个命令，最多检查 6 次，不会因目标文件暂未出现而提前宣告失败，也不会发起第二次生图。
+正式生成和编辑固定使用 `--timeout 180`，最多等待 3 分钟。客户端会立即向标准错误输出一条不含 Key、提示词或文件路径的 `image_request_started`，同步请求仍在执行时每 15 秒输出一条带剩余秒数的 `image_request_pending`；最终 JSON 报告继续单独写入标准输出。Codex 必须保留完整的结构化命令结果和原始命令 `session_id`，不能只读取 `output` 后丢弃会话句柄。外层 `cell_id` 可能只属于执行包装器，其结束且没有客户端 JSON 时不代表生图进程结束。
 
-满 180 秒仍未完成时，第 6 次心跳会改为 `image_request_timeout`。本次调用按超时失败处理，并在停止同一客户端会话后做最后一次文件检查。因为请求可能已经到达服务端，计费结果仍可能不确定，必须先核对使用记录再决定是否重新生成。
+Codex 会每 15 秒恢复同一个原始命令会话；`image_request_started`、`image_request_pending`、`still running`、外层 cell 无 JSON 结束、空输出和目标文件暂不存在都只是等待状态。图片提前完成时，客户端会立即保存并输出最终 JSON，不会等待满 3 分钟，也不会发起第二次生图。
+
+满 180 秒仍未完成时，心跳会改为 `image_request_deadline_reached`。它只表示调用方截止时间已到，不证明底层网络请求已经退出。Codex 会停止同一个原始命令会话并做最后一次文件检查；因为请求可能已经到达服务端，计费结果仍可能不确定，必须先核对使用记录再决定是否重新生成。
 
 需要进度事件时可以显式传 `--stream`；客户端届时发送 `stream=true` 和 `partial_images=1`。服务返回普通 JSON 时，客户端会在同一次请求中兼容处理，不会为了切换格式再发一次生图请求。`--no-stream` 可显式固定 JSON 模式。两者都不是 TLS 或网络故障后的重试机制。
 
@@ -177,7 +181,7 @@ sh install.sh
 - **Windows 提示 `credential_decryption`**：先更新仓库并重新运行 `install.bat`。安装器会自动迁移可读取的旧 Key；旧 Key 确实不可读时会要求输入替换 Key，不需要先删除配置文件。
 - **Windows 沙箱启动或权限失败**：优先使用 `[windows] sandbox = "elevated"`；若管理员或企业策略阻止初始化，再用 `unelevated` 作为兼容回退。运行 `doctor.py` 并检查 `.sandbox\sandbox.log`，不要把 `approvals_reviewer` 当成沙箱权限开关。
 - **图片目录仍要求写入审批**：用 `/status` 检查实际 Pictures 路径是否已经出现在 writable roots，并确认路径与 `[Environment]::GetFolderPath('MyPictures')` 的输出一致。
-- **Codex 很快提示图片不存在**：session ID、cell ID、空输出和 `image_request_pending` 都表示同一次命令仍在运行。更新 Skill 后，Codex 会按 30 秒间隔继续等待，最多 180 秒；在此之前不会用文件不存在作为失败依据。
+- **Codex 很快提示图片不存在**：确认 Codex 保留的是原始命令 `session_id`，而不是只等待外层 `cell_id` 或只读取命令的 `output`。`image_request_started`、`image_request_pending`、空输出和外层 cell 无客户端 JSON 结束都不是失败。更新 Skill 后，Codex 会按 15 秒间隔恢复同一个命令，最多等待 180 秒；在此之前不会用文件不存在作为失败依据。
 - **出现 `SSL: UNEXPECTED_EOF_WHILE_READING`**：先运行 `doctor.py --network` 检查同一 Base URL 的 TLS、网络和认证，再检查 Sub2API、反向代理和本地网络。若显式流式请求只收到 partial，计费状态不确定，不要直接重试；先核对 request ID 和服务端使用记录。改成非流式不能证明上一笔请求未计费。
 - **API Key 是否安全**：Windows 使用机器作用域 DPAPI 加密，并依赖用户目录 ACL 限制密文读取；同一台机器上能读取该配置文件的账户也能解密，因此不要移动到共享目录。macOS、Linux 和 WSL2 使用 `0600` 配置文件。不要把 Key 粘贴到 Codex 对话、命令参数、URL、Git 仓库或日志里。
 - **是否会产生费用**：安装和配置不会产生费用；只有实际生成或编辑图片时才会消耗 Sub2API 额度。

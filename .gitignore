@@ -42,6 +42,15 @@ dist/
 # Generated images, logs, and temporary output
 generated_images/
 test-output/
+/.sub2api-image-prompt.txt
+*-partial.png
+*-partial.jpg
+*-partial.jpeg
+*-partial.webp
+*.png.json
+*.jpg.json
+*.jpeg.json
+*.webp.json
 *.log
 *.tmp
 *.temp

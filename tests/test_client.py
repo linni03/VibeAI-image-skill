@@ -189,6 +189,7 @@ class MockServer:
 class ConfigTests(unittest.TestCase):
     def test_new_configuration_defaults_to_three_minutes(self) -> None:
         self.assertEqual(image_client.DEFAULT_TIMEOUT_SECONDS, 180)
+        self.assertEqual(image_client.DEFAULT_PROGRESS_INTERVAL_SECONDS, 15)
         self.assertEqual(
             Config("https://images.example.test/v1", "secret").timeout_seconds,
             180,
@@ -744,8 +745,18 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertTrue(report["ok"])
             self.assertEqual(len(server.state.requests), 1)
             self.assertGreaterEqual(len(heartbeats), 2)
+            self.assertEqual(heartbeats[0]["status"], "image_request_started")
+            self.assertEqual(heartbeats[0]["elapsed_seconds"], 0)
+            self.assertEqual(heartbeats[0]["remaining_seconds"], 180)
             self.assertTrue(
-                all(item["status"] == "image_request_pending" for item in heartbeats)
+                all(
+                    item["status"] == "image_request_pending"
+                    for item in heartbeats[1:]
+                )
+            )
+            self.assertNotIn(
+                "image_request_deadline_reached",
+                [item["status"] for item in heartbeats],
             )
             self.assertTrue(all(item["operation"] == "generate" for item in heartbeats))
             self.assertTrue(all(item["timeout_seconds"] == 180 for item in heartbeats))
@@ -776,7 +787,22 @@ class ClientIntegrationTests(unittest.TestCase):
         self.assertEqual(error["billing_status"], "ambiguous")
         self.assertFalse(error["retry_safe"])
 
-    def test_heartbeat_reports_scaled_thirty_second_checks(self) -> None:
+    def test_heartbeat_emits_started_immediately(self) -> None:
+        output = io.StringIO()
+        with patch("image_client.time.monotonic", return_value=100.0):
+            with RequestHeartbeat(
+                "generate", 180, interval_seconds=60, stream=output
+            ):
+                pass
+
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["status"], "image_request_started")
+        self.assertEqual(payloads[0]["elapsed_seconds"], 0)
+        self.assertEqual(payloads[0]["remaining_seconds"], 180)
+        self.assertEqual(payloads[0]["timeout_seconds"], 180)
+
+    def test_heartbeat_reports_scaled_fifteen_second_checks(self) -> None:
         class ScriptedStop:
             def wait(self, _interval: float) -> bool:
                 return False
@@ -787,18 +813,23 @@ class ClientIntegrationTests(unittest.TestCase):
         heartbeat._started = 100.0
         with patch(
             "image_client.time.monotonic",
-            side_effect=(130.0, 160.0, 190.0, 220.0, 250.0, 280.0),
+            side_effect=tuple(float(value) for value in range(115, 281, 15)),
         ):
             heartbeat._run()
 
         payloads = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(
             [item["elapsed_seconds"] for item in payloads],
-            [30, 60, 90, 120, 150, 180],
+            list(range(15, 181, 15)),
         )
         self.assertEqual(
             [item["status"] for item in payloads],
-            ["image_request_pending"] * 5 + ["image_request_timeout"],
+            ["image_request_pending"] * 11
+            + ["image_request_deadline_reached"],
+        )
+        self.assertEqual(
+            [item["remaining_seconds"] for item in payloads],
+            list(range(165, -1, -15)),
         )
         self.assertTrue(all(item["timeout_seconds"] == 180 for item in payloads))
 
@@ -807,7 +838,11 @@ class ClientIntegrationTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("exactly once with `--timeout 180`", skill)
-        self.assertIn("at most six checks and 180 seconds total", skill)
+        self.assertIn("retain the original command `session_id`", skill)
+        self.assertIn("outer `cell_id`", skill)
+        self.assertIn("Never reduce a command result to `output` alone", skill)
+        self.assertIn("intervals of up to 15 seconds", skill)
+        self.assertIn("Only an explicit client exit", skill)
         self.assertIn("empty output", skill)
         self.assertIn("Never start another client invocation", skill)
 
@@ -824,19 +859,23 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertIn("no verified 2K square preset", str(caught.exception))
             self.assertEqual(server.state.requests, [])
 
-    def test_data_url_and_resolution_mismatch(self) -> None:
+    def test_data_url_and_4k_resolution_mismatch(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:
             server.state.response_mode = "data-url"
             report = generate_images(
                 self.config(server),
                 prompt="draw",
-                exact_size="2048x2048",
+                exact_size="3840x2160",
                 output_dir=directory,
             )
             self.assertFalse(report["ok"])
+            self.assertEqual(report["requested_size"], "3840x2160")
+            self.assertEqual(report["requested_tier"], "4K")
             self.assertFalse(report["tier_match"])
+            self.assertFalse(report["orientation_match"])
             self.assertFalse(report["exact_size_match"])
             self.assertEqual(report["error"]["category"], "response_mismatch")
+            self.assertEqual(report["images"][0]["actual_size"], "1024x1024")
             self.assertTrue(Path(report["images"][0]["path"]).exists())
 
     def test_auto_size_skips_dimension_claims(self) -> None:

@@ -45,9 +45,9 @@ Treat size, tier, orientation, image count, or output format mismatch as a faile
 
 ## Client Wait Lifecycle
 
-Use a 180-second timeout for paid generation and edit commands. While a synchronous request is pending, the client writes a secret-free `image_request_pending` heartbeat to stderr every 30 seconds; stdout remains reserved for the final JSON report. A session ID, cell ID, heartbeat, `still running`, or empty output is not a completed response. Continue the same command session for up to six checks and never infer failure from a missing target file before the deadline.
+Use a 180-second timeout for paid generation and edit commands. The client immediately writes a secret-free `image_request_started` event to stderr, then writes `image_request_pending` every 15 seconds while the synchronous request is pending; stdout remains reserved for the final JSON report. Preserve the complete structured command result and its original `session_id`. An outer `cell_id` may identify only an execution wrapper, so completing that cell without client JSON is not client completion. Never extract only `output` and discard a returned session handle. Continue the original command session and never infer failure from a missing target file before the deadline.
 
-At 180 seconds, the sixth heartbeat changes to `image_request_timeout`. Stop the same client session if needed and check the output once more. Treat a client timeout as failure with ambiguous billing, because terminating the local wait cannot prove that the upstream stopped processing. Never launch a replacement request automatically.
+At 180 seconds, the heartbeat changes to `image_request_deadline_reached`. This is a caller deadline signal, not proof that the network request exited. Stop the same original command session if needed and check the output once more. Treat the timeout as failure with ambiguous billing, because terminating the local wait cannot prove that the upstream stopped processing. Never launch a replacement request automatically.
 
 `credential_decryption` is a local pre-request failure, not an API status. Report its configuration path, DPAPI error code when available, and stored protection scheme. Update or reconfigure the skill; preserve validated non-secret settings, and require a replacement key only when the old credential cannot be migrated.
 
