@@ -14,12 +14,14 @@ from typing import Any, Mapping, Sequence
 
 from image_client import (
     DEFAULT_CONFIG_PATH,
+    DEFAULT_PROGRESS_INTERVAL_SECONDS,
     Config,
     ConfigError,
     default_stream_for_profile,
     GenerationResult,
     ImageClient,
     ImageValidationError,
+    RequestHeartbeat,
     SkillError,
     StreamInterruptedError,
     load_config,
@@ -294,6 +296,7 @@ def generate_images(
     stream: bool | None = None,
     dry_run: bool = False,
     metadata: Path | str | None = None,
+    heartbeat_interval_seconds: float = DEFAULT_PROGRESS_INTERVAL_SECONDS,
 ) -> dict[str, Any]:
     selected_count = validate_count(count)
     selected_output_format = select_output_format(output_format, output_path)
@@ -382,15 +385,20 @@ def generate_images(
     started = time.monotonic()
     client = ImageClient(selected_config)
     try:
-        if selected_stream:
-            generation = client.generate_stream(payload)
-        else:
-            response, headers = client.generate(payload)
-            generation = GenerationResult(
-                response=response,
-                headers=headers,
-                response_mode="json",
-            )
+        with RequestHeartbeat(
+            "generate",
+            selected_config.timeout_seconds,
+            interval_seconds=heartbeat_interval_seconds,
+        ):
+            if selected_stream:
+                generation = client.generate_stream(payload)
+            else:
+                response, headers = client.generate(payload)
+                generation = GenerationResult(
+                    response=response,
+                    headers=headers,
+                    response_mode="json",
+                )
     except StreamInterruptedError as exc:
         save_interrupted_partials(
             client,
@@ -488,7 +496,11 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Write safe JSON metadata; omit PATH for an automatic sidecar",
     )
-    parser.add_argument("--timeout", type=int, help="Per-request timeout in seconds")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        help="Per-request timeout in seconds (skill workflow: 180)",
+    )
     streaming = parser.add_mutually_exclusive_group()
     streaming.add_argument(
         "--stream",

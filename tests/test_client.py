@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
+import socket
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zlib
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +36,7 @@ from image_client import (  # noqa: E402
     CredentialDecryptionError,
     ImageClient,
     ImageValidationError,
+    RequestHeartbeat,
     default_config_path,
     discover_config_path,
     inspect_image,
@@ -91,6 +96,7 @@ class MockState:
         self.response_mode = "b64"
         self.response_count = 1
         self.error_status: int | None = None
+        self.delay_seconds = 0.0
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -109,6 +115,8 @@ class MockHandler(BaseHTTPRequestHandler):
                 "body": body,
             }
         )
+        if self.server.state.delay_seconds:
+            time.sleep(self.server.state.delay_seconds)
         if self.server.state.error_status is not None:
             payload = json.dumps(
                 {
@@ -179,6 +187,13 @@ class MockServer:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_new_configuration_defaults_to_three_minutes(self) -> None:
+        self.assertEqual(image_client.DEFAULT_TIMEOUT_SECONDS, 180)
+        self.assertEqual(
+            Config("https://images.example.test/v1", "secret").timeout_seconds,
+            180,
+        )
+
     def test_platform_default_config_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "home"
@@ -710,6 +725,91 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(request_payload["size"], "1024x1024")
             self.assertEqual(request_payload["response_format"], "b64_json")
             self.assertNotIn("secret-test-key", json.dumps(report))
+
+    def test_delayed_generation_emits_heartbeats_and_sends_one_request(self) -> None:
+        with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            server.state.delay_seconds = 0.045
+            stderr = io.StringIO()
+            stdout = io.StringIO()
+            with redirect_stderr(stderr), redirect_stdout(stdout):
+                report = generate_images(
+                    self.config(server),
+                    prompt="slow image",
+                    output_dir=directory,
+                    timeout_seconds=180,
+                    heartbeat_interval_seconds=0.01,
+                )
+
+            heartbeats = [json.loads(line) for line in stderr.getvalue().splitlines()]
+            self.assertTrue(report["ok"])
+            self.assertEqual(len(server.state.requests), 1)
+            self.assertGreaterEqual(len(heartbeats), 2)
+            self.assertTrue(
+                all(item["status"] == "image_request_pending" for item in heartbeats)
+            )
+            self.assertTrue(all(item["operation"] == "generate" for item in heartbeats))
+            self.assertTrue(all(item["timeout_seconds"] == 180 for item in heartbeats))
+            self.assertNotIn("slow image", stderr.getvalue())
+            self.assertNotIn("secret-test-key", stderr.getvalue())
+            self.assertEqual(stdout.getvalue(), "")
+
+    def test_timeout_is_ambiguous_failure_without_retry(self) -> None:
+        config = Config(
+            "https://images.example.test/v1",
+            "secret-test-key",
+            timeout_seconds=180,
+        )
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "image_client.urlopen", side_effect=socket.timeout("timed out")
+        ) as request:
+            with self.assertRaises(APIError) as caught:
+                generate_images(
+                    config,
+                    prompt="timeout image",
+                    output_dir=directory,
+                    timeout_seconds=180,
+                )
+
+        error = caught.exception.as_dict()["error"]
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(error["category"], "network_timeout")
+        self.assertEqual(error["billing_status"], "ambiguous")
+        self.assertFalse(error["retry_safe"])
+
+    def test_heartbeat_reports_scaled_thirty_second_checks(self) -> None:
+        class ScriptedStop:
+            def wait(self, _interval: float) -> bool:
+                return False
+
+        output = io.StringIO()
+        heartbeat = RequestHeartbeat("generate", 180, stream=output)
+        heartbeat._stop = ScriptedStop()  # type: ignore[assignment]
+        heartbeat._started = 100.0
+        with patch(
+            "image_client.time.monotonic",
+            side_effect=(130.0, 160.0, 190.0, 220.0, 250.0, 280.0),
+        ):
+            heartbeat._run()
+
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(
+            [item["elapsed_seconds"] for item in payloads],
+            [30, 60, 90, 120, 150, 180],
+        )
+        self.assertEqual(
+            [item["status"] for item in payloads],
+            ["image_request_pending"] * 5 + ["image_request_timeout"],
+        )
+        self.assertTrue(all(item["timeout_seconds"] == 180 for item in payloads))
+
+    def test_skill_requires_same_session_waiting_and_explicit_timeout(self) -> None:
+        skill = (REPO_ROOT / "skills" / "sub2api-image" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("exactly once with `--timeout 180`", skill)
+        self.assertIn("at most six checks and 180 seconds total", skill)
+        self.assertIn("empty output", skill)
+        self.assertIn("Never start another client invocation", skill)
 
     def test_unverified_oauth_preset_fails_before_network(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:

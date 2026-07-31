@@ -11,14 +11,16 @@ Use the bundled standard-library Python clients. The default `sub2api-openai-oau
 
 1. Locate this skill directory and call its scripts in place. Do not copy them into the user's project.
 2. Parse the operation, prompt, tier or exact size, orientation, count, model, format, output path, input images, mask, and optional native image parameters.
-3. For a clear generation or edit request, invoke `generate.py` or `edit.py` exactly once. The client loads and validates configuration itself. Do not run `configure.py --show`, a Python probe, or `--dry-run` first.
+3. For a clear generation or edit request, invoke `generate.py` or `edit.py` exactly once with `--timeout 180`. The client loads and validates configuration itself. Do not run `configure.py --show`, a Python probe, or `--dry-run` first.
 4. Treat a clear request to generate or edit as authorization for one billable API request. Do not ask for a second conversational confirmation. A Codex sandbox approval may still appear when required by the user's security policy.
 5. Default an omitted resolution to `1K` square. For OAuth presets, use only `1K` square, `2K` landscape, or `2K` portrait. If another preset is requested, report the local validation error or use an exact `--size` only when that exact backend capability is known. Ask once only when a missing choice materially changes the result.
 6. Use `--dry-run` only when the user explicitly asks for a no-cost validation, after new configuration during troubleshooting, or when request options cannot be resolved safely. Never include `--dry-run` in the command intended to create the requested image.
-7. Read the JSON report. Treat `partial_images` as diagnostics, never final outputs. When local image viewing is available, inspect every final saved image for blank/error output and obvious prompt or edit mismatch.
-8. Report every absolute output path, requested model and size, actual dimensions, actual billing tier, and any visual-fidelity caveat.
-9. Treat any false `tier_match`, `orientation_match`, `exact_size_match`, `count_match`, or `format_match` as failure. A null size match means `size=auto` made that check inapplicable.
-10. Return actionable errors without exposing credentials. Read [references/sub2api-api.md](references/sub2api-api.md) for protocol or error troubleshooting. Read [references/model-capabilities.md](references/model-capabilities.md) before choosing custom sizes or diagnosing size failures.
+7. Keep waiting on the same command when the tool returns a session ID, cell ID, `still running`, an `image_request_pending` heartbeat, or empty output. These are pending states, not failures. Resume that session in intervals of up to 30 seconds for at most six checks and 180 seconds total. Never start another client invocation while the original may still be running.
+8. Do not use an absent output file before 180 seconds as evidence of failure. If session tracking is temporarily unavailable, poll the original process and target path without invoking `generate.py` or `edit.py` again. Treat `image_request_timeout` as the 180-second deadline: stop the same client session if it is still running, perform one final output check, and report timeout failure with ambiguous billing.
+9. Require an explicit client exit and JSON report for completion. Treat `partial_images` as diagnostics, never final outputs. When local image viewing is available, inspect every final saved image for blank/error output and obvious prompt or edit mismatch.
+10. Report every absolute output path, requested model and size, actual dimensions, actual billing tier, and any visual-fidelity caveat.
+11. Treat any false `tier_match`, `orientation_match`, `exact_size_match`, `count_match`, or `format_match` as failure. A null size match means `size=auto` made that check inapplicable.
+12. Return actionable errors without exposing credentials. Read [references/sub2api-api.md](references/sub2api-api.md) for protocol or error troubleshooting. Read [references/model-capabilities.md](references/model-capabilities.md) before choosing custom sizes or diagnosing size failures.
 
 ## Runtime
 
@@ -43,13 +45,13 @@ Use `--show` only when the user asks to inspect or diagnose configuration. Use `
 ## Generate
 
 ```text
-<python> <skill-dir>/scripts/generate.py --prompt "A quiet city at dawn" --tier 1K --orientation square --output ./city.png
+<python> <skill-dir>/scripts/generate.py --prompt "A quiet city at dawn" --tier 1K --orientation square --output ./city.png --timeout 180
 ```
 
 For a native OS Pictures folder, use one command and let the client resolve the real known-folder path:
 
 ```text
-<python> <skill-dir>/scripts/generate.py --prompt "A soothing pixel-art landscape" --tier 2K --orientation landscape --pictures healing_pixel_landscape_2k.png
+<python> <skill-dir>/scripts/generate.py --prompt "A soothing pixel-art landscape" --tier 2K --orientation landscape --pictures healing_pixel_landscape_2k.png --timeout 180
 ```
 
 Use `--prompt-file` for long prompts. Use `--size auto` only when the upstream should choose dimensions; otherwise pass a validated `WIDTHxHEIGHT`. Use `--output-dir` for generated names or `--output` for an exact filename/multi-image basename. The output extension selects PNG, JPEG, or WebP unless `--output-format` is explicitly consistent. Never add `--overwrite` unless replacement is intended.
@@ -62,15 +64,17 @@ When a validated completed image arrives before a transport EOF, keep the final 
 
 Honor an explicit output path first. When the user says Pictures, My Pictures, 图片目录, or 图片文件夹 without an absolute path, pass `--pictures` with a safe filename. When the user asks for the current project or current directory, pass an explicit relative `--output` path inside the active workspace.
 
-Pass `--quality`, `--background`, `--moderation`, `--output-compression`, `--timeout`, or `--metadata` only when requested or operationally needed. Transparent backgrounds require PNG or WebP; compression applies only to JPEG or WebP.
+Always pass `--timeout 180` for a paid generation. The client emits a secret-free `image_request_pending` heartbeat to stderr every 30 seconds while the synchronous request is pending; keep waiting on that invocation. Pass `--quality`, `--background`, `--moderation`, `--output-compression`, or `--metadata` only when requested or operationally needed. Transparent backgrounds require PNG or WebP; compression applies only to JPEG or WebP.
 
 ## Edit
 
 ```text
-<python> <skill-dir>/scripts/edit.py --image <absolute-source-path> --prompt "Replace the background with a snowy mountain"
+<python> <skill-dir>/scripts/edit.py --image <absolute-source-path> --prompt "Replace the background with a snowy mountain" --timeout 180
 ```
 
 Repeat `--image` for multiple reference images. Add one `--mask` when supplied; its dimensions must match the first input image. Use only local PNG, JPEG, or WebP inputs. Do not silently resize inputs.
+
+Always pass `--timeout 180` for a paid edit and apply the same single-session waiting rules as generation.
 
 ## Validate Installation
 
@@ -101,6 +105,7 @@ Run `<python> <skill-dir>/scripts/smoke_test.py` only when a real paid 1K genera
 - On native Windows, treat the config file ACL as part of credential protection; machine-scoped DPAPI is machine-bound rather than user-bound.
 - If the sandbox blocks a clear request, request one scoped approval for the actual generation or edit command. Do not use `--show` or `--dry-run` as a permission probe.
 - Never retry authentication, permission, validation, response-mismatch, network-timeout, or HTTP 524 failures automatically.
+- Treat missing files, empty command output, and pending command sessions before the 180-second deadline as inconclusive, not failure.
 - Treat 524, TLS EOF, incomplete response, reset, disconnect, and client timeout failures as ambiguous paid outcomes. Check the image-only direct Base URL, proxy/origin timeouts, request ID, and usage logs before asking for retry approval.
 - Never silently downgrade size, model, count, quality, format, or other native options.
 - Keep returned images; remove only temporary files created during the current workflow.

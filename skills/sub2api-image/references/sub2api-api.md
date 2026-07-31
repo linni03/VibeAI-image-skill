@@ -43,6 +43,12 @@ Treat size, tier, orientation, image count, or output format mismatch as a faile
 | `524` | `edge_timeout` | Check direct image ingress, proxy/origin timeouts, request ID, and usage before retry approval |
 | other `5xx` | `server_or_upstream` | Report the safe server message and request ID |
 
+## Client Wait Lifecycle
+
+Use a 180-second timeout for paid generation and edit commands. While a synchronous request is pending, the client writes a secret-free `image_request_pending` heartbeat to stderr every 30 seconds; stdout remains reserved for the final JSON report. A session ID, cell ID, heartbeat, `still running`, or empty output is not a completed response. Continue the same command session for up to six checks and never infer failure from a missing target file before the deadline.
+
+At 180 seconds, the sixth heartbeat changes to `image_request_timeout`. Stop the same client session if needed and check the output once more. Treat a client timeout as failure with ambiguous billing, because terminating the local wait cannot prove that the upstream stopped processing. Never launch a replacement request automatically.
+
 `credential_decryption` is a local pre-request failure, not an API status. Report its configuration path, DPAPI error code when available, and stored protection scheme. Update or reconfigure the skill; preserve validated non-secret settings, and require a replacement key only when the old credential cannot be migrated.
 
 Timeouts, TLS EOF, incomplete HTTP bodies, remote disconnects and connection resets are ambiguous paid outcomes: the upstream might finish after the client disconnects. Never retry automatically.

@@ -15,7 +15,9 @@ import socket
 import ssl
 import stat
 import struct
+import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -31,7 +33,8 @@ from image_stream import ImageStreamState, SSEEventError, SSEImageParser, SSEPar
 DEFAULT_BASE_URL = "https://images.vibeai.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_OUTPUT_DIR = "generated_images"
-DEFAULT_TIMEOUT_SECONDS = 900
+DEFAULT_TIMEOUT_SECONDS = 180
+DEFAULT_PROGRESS_INTERVAL_SECONDS = 30
 DEFAULT_PROVIDER_PROFILE = "sub2api-openai-oauth"
 LEGACY_CONFIG_PATH = Path("~/.config/sub2api-image/config.json").expanduser()
 MAX_CONFIG_BYTES = 64 * 1024
@@ -178,6 +181,55 @@ class CredentialDecryptionError(ConfigError):
 
 class ImageValidationError(SkillError):
     category = "image_validation"
+
+
+class RequestHeartbeat:
+    """Emit secret-free progress while a synchronous image request is pending."""
+
+    def __init__(
+        self,
+        operation: str,
+        timeout_seconds: int,
+        *,
+        interval_seconds: float = DEFAULT_PROGRESS_INTERVAL_SECONDS,
+        stream: Any = None,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("Heartbeat interval must be positive")
+        self.operation = operation
+        self.timeout_seconds = timeout_seconds
+        self.interval_seconds = interval_seconds
+        self.stream = stream if stream is not None else sys.stderr
+        self._stop = threading.Event()
+        self._started = 0.0
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "RequestHeartbeat":
+        self._started = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            elapsed = max(1, int(time.monotonic() - self._started))
+            timed_out = elapsed >= self.timeout_seconds
+            payload = {
+                "status": (
+                    "image_request_timeout" if timed_out else "image_request_pending"
+                ),
+                "operation": self.operation,
+                "elapsed_seconds": elapsed,
+                "timeout_seconds": self.timeout_seconds,
+            }
+            print(json.dumps(payload, sort_keys=True), file=self.stream, flush=True)
+            if timed_out:
+                return
 
 
 class APIError(SkillError):

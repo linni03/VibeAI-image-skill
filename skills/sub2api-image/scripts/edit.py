@@ -28,9 +28,11 @@ from generate import (
 )
 from image_client import (
     DEFAULT_CONFIG_PATH,
+    DEFAULT_PROGRESS_INTERVAL_SECONDS,
     Config,
     ConfigError,
     ImageClient,
+    RequestHeartbeat,
     inspect_image,
     load_config,
     pictures_output,
@@ -80,6 +82,7 @@ def edit_image(
     timeout_seconds: int | None = None,
     dry_run: bool = False,
     metadata: Path | str | None = None,
+    heartbeat_interval_seconds: float = DEFAULT_PROGRESS_INTERVAL_SECONDS,
 ) -> dict[str, Any]:
     selected_count = validate_count(count)
     selected_output_format = select_output_format(output_format, output_path)
@@ -213,7 +216,12 @@ def edit_image(
 
     started = time.monotonic()
     client = ImageClient(selected_config)
-    response, headers = client.edit(fields, files)
+    with RequestHeartbeat(
+        "edit",
+        selected_config.timeout_seconds,
+        interval_seconds=heartbeat_interval_seconds,
+    ):
+        response, headers = client.edit(fields, files)
     images = save_response_images(
         client,
         response,
@@ -295,7 +303,11 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Write safe JSON metadata; omit PATH for an automatic sidecar",
     )
-    parser.add_argument("--timeout", type=int, help="Per-request timeout in seconds")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        help="Per-request timeout in seconds (skill workflow: 180)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate without network or file writes")
     parser.add_argument(
         "--config",
