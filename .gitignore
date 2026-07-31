@@ -1,13 +1,54 @@
+# Local Codex and agent state
+/.agents/
+/.codex/
+.runtime.json
+
+# Secrets and local configuration
 .env
-  .env.*
-  *.key
-  *.pem
-  *.secret
-  __pycache__/
-  *.py[cod]
-  .pytest_cache/
-  .venv/
-  venv/
-  dist/
-  build/
-  .DS_Store
+.env.*
+!.env.example
+*.key
+*.pem
+*.secret
+config.json
+!config.example.json
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments and build output
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+
+# Generated images, logs, and temporary output
+generated_images/
+test-output/
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Editor settings
+.idea/
+.vscode/
+
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

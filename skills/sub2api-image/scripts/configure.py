@@ -18,6 +18,7 @@ from image_client import (
     DEFAULT_TIMEOUT_SECONDS,
     Config,
     ConfigError,
+    config_protection,
     config_from_mapping,
     load_config,
     print_json,
@@ -57,7 +58,7 @@ def configure(args: argparse.Namespace) -> dict[str, object]:
     path = args.config.expanduser()
     existing: Config | None = None
     if path.exists():
-        existing = load_config(path)
+        existing = load_config(path, apply_env=False)
 
     if not sys.stdin.isatty():
         raise ConfigError(
@@ -85,7 +86,9 @@ def configure(args: argparse.Namespace) -> dict[str, object]:
     written_path = save_config(config, path)
     result = config.public_dict(written_path)
     result["ok"] = True
-    result["permissions"] = oct(os.stat(written_path).st_mode & 0o777)
+    result["credential_protection"] = config_protection()
+    if os.name == "posix":
+        result["permissions"] = oct(os.stat(written_path).st_mode & 0o777)
     return result
 
 
@@ -96,11 +99,16 @@ def main() -> int:
             result = remove_config(args.config)
         elif args.show:
             config = load_config(args.config)
-            result = config.public_dict(args.config.expanduser())
+            config_path = args.config.expanduser()
+            result = config.public_dict(config_path if config_path.exists() else None)
             result["ok"] = True
-            result["permissions"] = oct(
-                os.stat(args.config.expanduser()).st_mode & 0o777
-            )
+            if config_path.exists():
+                result["credential_protection"] = config_protection()
+                if os.name == "posix":
+                    result["permissions"] = oct(os.stat(config_path).st_mode & 0o777)
+                result["source"] = "file_with_environment_overrides"
+            else:
+                result["source"] = "environment"
         else:
             result = configure(args)
         print_json(result)

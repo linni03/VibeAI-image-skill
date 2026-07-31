@@ -2,57 +2,45 @@
 
 ## Endpoints
 
-Use a base URL ending in `/v1`. The client normalizes a bare origin by appending `/v1` and avoids duplicate `/v1/v1` segments.
+Use a Base URL ending in `/v1`. The client appends `/v1` to a bare origin and avoids duplicate `/v1/v1` segments.
 
 | Operation | Method and path | Body |
 | --- | --- | --- |
 | Generate | `POST /v1/images/generations` | JSON |
 | Edit | `POST /v1/images/edits` | `multipart/form-data` |
 
-Authenticate with `Authorization: Bearer <Sub2API user key>`. Never use an upstream account credential.
+Authenticate with a Sub2API image-enabled user key. The client does not implement async generation, edit, or task polling routes.
 
-The current Sub2API gateway does not expose `/images/generations/async`, `/images/edits/async`, or `/images/tasks/{id}`. A `404` for those paths is not evidence that object storage is misconfigured; those routes are not part of this client contract.
+## Requests
 
-## Generate Request
+Generation sends `model`, `prompt`, `size`, `n`, `response_format=b64_json`, and `output_format`. Editing sends equivalent scalar multipart fields and repeats the `image` part for each local reference image. It sends at most one `mask` part.
 
-The client sends these OpenAI-compatible fields:
+Optional supported fields include `quality`, `background`, `moderation`, `output_compression`, and edit `input_fidelity`. Transparent backgrounds require PNG or WebP. Output compression is an integer from 0 through 100 and applies only to JPEG or WebP.
 
-```json
-{
-  "model": "gpt-image-2",
-  "prompt": "...",
-  "size": "1024x1024",
-  "n": 1,
-  "response_format": "b64_json",
-  "output_format": "png"
-}
-```
+Use `Cache-Control: no-store` and `Pragma: no-cache`. `b64_json` avoids an object-storage dependency; never write base64 response bodies to logs or metadata.
 
-Optional fields are omitted unless requested. `b64_json` avoids an object-storage dependency and is decoded in memory without writing base64 to a log or intermediate file.
+## Responses
 
-## Edit Request
+Require a non-empty `data[]`. Each item must contain valid `b64_json`, a data URL, or an HTTP(S) URL that decodes to PNG, JPEG, or WebP. Inspect file magic and actual dimensions before atomic save.
 
-Send the same scalar fields as multipart fields. Send the input as `image` and an optional mask as `mask`. The client accepts PNG, JPEG, and WebP and checks file magic before upload.
+Reports preserve only safe scalar response metadata and usage scalars. Metadata sidecars may contain request options and local paths, but must exclude API keys, image base64, response URLs, and signed URL query parameters.
 
-## Response
-
-Successful responses contain `data[]` entries with either `b64_json` or `url`. The client supports base64, data URLs, and HTTP(S) URLs, then writes each image atomically. It recognizes PNG, JPEG, and WebP by file content rather than trusting a requested extension.
-
-Sub2API may also return top-level `model`, `size`, `output_format`, and `usage`. The report preserves safe metadata but never includes response image payloads or authorization data.
+Treat size, tier, orientation, image count, or output format mismatch as a failed result even when files were saved.
 
 ## Errors
 
-| Status | Meaning | Action |
+| Status | Category | Action |
 | --- | --- | --- |
-| `400` | Invalid prompt, model option, size, or multipart input | Fix the named field; do not retry unchanged |
-| `401` | Invalid or revoked Sub2API user key | Reconfigure with a valid user key |
-| `403` | The key's group cannot generate images | Enable image generation on the group or use the correct key |
-| `404` | Wrong base URL/path or unavailable model route | Check the normalized base URL and deployed Sub2API version |
-| `429` | User/group/account rate or concurrency limit | Respect `Retry-After`, then retry only with user approval |
-| `5xx` | Sub2API or upstream account failure | Report the request ID and safe server message |
+| `400` | `invalid_request` | Fix the named field; do not retry unchanged |
+| `401` | `authentication` | Reconfigure with a valid Sub2API user key |
+| `403` | `permission` | Use an image-enabled group/key |
+| `404` | `not_found` | Check normalized Base URL, route, model, and deployment version |
+| `429` | `rate_limit` | Respect `Retry-After`; retry only with user approval |
+| `524` | `edge_timeout` | Check direct image ingress, proxy/origin timeouts, request ID, and usage before retry approval |
+| other `5xx` | `server_or_upstream` | Report the safe server message and request ID |
 
-Timeouts are ambiguous: the upstream might have completed after the client disconnected. Do not automatically repeat a paid request. Ask before retrying.
+Timeouts are ambiguous paid outcomes: the upstream might finish after the client disconnects. Never retry automatically.
 
 ## Billing Verification
 
-The client reports requested and actual image tiers. A normal user API key cannot query administrator usage logs. The Sub2API operator must separately verify `image_count`, `image_size`, `image_size_source`, `image_size_breakdown`, and the charged amount in the admin usage log.
+The client reports requested and actual tiers but cannot query administrator-only usage logs with a normal user key. Ask the Sub2API operator to verify `image_count`, `image_size`, `image_size_source`, `image_size_breakdown`, and charged amount separately.

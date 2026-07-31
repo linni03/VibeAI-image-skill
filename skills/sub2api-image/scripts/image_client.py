@@ -36,13 +36,28 @@ MAX_ERROR_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 128 * 1024 * 1024
 MAX_IMAGE_BYTES = 100 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-USER_AGENT = "sub2api-image-skill/1.0"
+USER_AGENT = "sub2api-image-skill/1.1"
+WINDOWS_DPAPI_SCHEME = "windows-dpapi-current-user"
+
+SIZE_ALIGNMENT = 16
+MIN_IMAGE_PIXELS = 655_360
+MAX_IMAGE_PIXELS = 8_294_400
+MAX_IMAGE_EDGE = 3_840
+MAX_ASPECT_RATIO = 3
+
+CONFIG_ENV_VARS = {
+    "base_url": "SUB2API_IMAGE_BASE_URL",
+    "api_key": "SUB2API_IMAGE_API_KEY",
+    "model": "SUB2API_IMAGE_MODEL",
+    "output_dir": "SUB2API_IMAGE_OUTPUT_DIR",
+    "timeout_seconds": "SUB2API_IMAGE_TIMEOUT_SECONDS",
+}
 
 SIZE_PRESETS = {
     "1K": {
         "square": "1024x1024",
-        "landscape": "1024x576",
-        "portrait": "576x1024",
+        "landscape": "1024x640",
+        "portrait": "640x1024",
     },
     "2K": {
         "square": "2048x2048",
@@ -50,7 +65,7 @@ SIZE_PRESETS = {
         "portrait": "1152x2048",
     },
     "4K": {
-        "square": "3840x3840",
+        "square": "2880x2880",
         "landscape": "3840x2160",
         "portrait": "2160x3840",
     },
@@ -105,6 +120,12 @@ class APIError(SkillError):
             details["retry_after"] = self.retry_after
         if self.request_id:
             details["request_id"] = self.request_id
+        if self.status == 524:
+            details["retry_safe"] = False
+            details["action"] = (
+                "The paid request outcome is ambiguous. Check the image-only direct base URL, "
+                "Cloudflare/origin timeouts, and usage logs before approving a retry."
+            )
         return {"ok": False, "error": details}
 
 
@@ -230,31 +251,187 @@ def config_from_mapping(data: Mapping[str, Any]) -> Config:
     )
 
 
-def load_config(path: Path | str | None = None) -> Config:
+def _environment_overrides() -> dict[str, str]:
+    return {
+        field: os.environ[variable]
+        for field, variable in CONFIG_ENV_VARS.items()
+        if variable in os.environ
+    }
+
+
+def config_protection() -> str:
+    if os.name == "nt":
+        return WINDOWS_DPAPI_SCHEME
+    return "posix-mode-0600"
+
+
+def _windows_dpapi(data: bytes, *, protect: bool) -> bytes:
+    if os.name != "nt":
+        raise ConfigError("Windows DPAPI credentials can only be used on Windows")
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class DataBlob(ctypes.Structure):
+            _fields_ = [
+                ("size", wintypes.DWORD),
+                ("data", ctypes.POINTER(ctypes.c_ubyte)),
+            ]
+
+        input_buffer = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+        input_blob = DataBlob(
+            len(data), ctypes.cast(input_buffer, ctypes.POINTER(ctypes.c_ubyte))
+        )
+        output_blob = DataBlob()
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        if protect:
+            operation = crypt32.CryptProtectData
+            operation.argtypes = [
+                ctypes.POINTER(DataBlob),
+                wintypes.LPCWSTR,
+                ctypes.POINTER(DataBlob),
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.POINTER(DataBlob),
+            ]
+            arguments = (
+                ctypes.byref(input_blob),
+                "VibeAI Sub2API Image API Key",
+                None,
+                None,
+                None,
+                0x1,
+                ctypes.byref(output_blob),
+            )
+        else:
+            operation = crypt32.CryptUnprotectData
+            operation.argtypes = [
+                ctypes.POINTER(DataBlob),
+                ctypes.POINTER(wintypes.LPWSTR),
+                ctypes.POINTER(DataBlob),
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.POINTER(DataBlob),
+            ]
+            arguments = (
+                ctypes.byref(input_blob),
+                None,
+                None,
+                None,
+                None,
+                0x1,
+                ctypes.byref(output_blob),
+            )
+
+        operation.restype = wintypes.BOOL
+        if not operation(*arguments):
+            error_code = ctypes.get_last_error()
+            action = "protect" if protect else "unprotect"
+            raise ConfigError(
+                f"Windows DPAPI could not {action} the API key (error {error_code})"
+            )
+
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        try:
+            return ctypes.string_at(output_blob.data, output_blob.size)
+        finally:
+            if output_blob.data:
+                kernel32.LocalFree(ctypes.cast(output_blob.data, ctypes.c_void_p))
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise ConfigError(
+            f"Windows DPAPI is unavailable ({type(exc).__name__})"
+        ) from exc
+
+
+def _protect_api_key(value: str) -> str:
+    protected = _windows_dpapi(value.encode("utf-8"), protect=True)
+    return base64.b64encode(protected).decode("ascii")
+
+
+def _unprotect_api_key(value: str) -> str:
+    try:
+        protected = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ConfigError("Windows DPAPI API key payload is invalid") from exc
+    if not protected:
+        raise ConfigError("Windows DPAPI API key payload is empty")
+    raw = _windows_dpapi(protected, protect=False)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError("Windows DPAPI API key is not valid UTF-8") from exc
+
+
+def _config_payload(config: Config) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "base_url": config.base_url,
+        "model": config.model,
+        "output_dir": config.output_dir,
+        "timeout_seconds": config.timeout_seconds,
+    }
+    if os.name == "nt":
+        payload["api_key_protection"] = WINDOWS_DPAPI_SCHEME
+        payload["api_key_protected"] = _protect_api_key(config.api_key)
+    else:
+        payload["api_key"] = config.api_key
+    return payload
+
+
+def load_config(
+    path: Path | str | None = None, *, apply_env: bool = True
+) -> Config:
     config_path = Path(path).expanduser() if path else DEFAULT_CONFIG_PATH
+    data: Mapping[str, Any]
     try:
         info = config_path.stat()
     except FileNotFoundError as exc:
-        raise ConfigError(
-            f"Configuration not found at {config_path}; run configure.py first"
-        ) from exc
-    if not stat.S_ISREG(info.st_mode):
-        raise ConfigError(f"Configuration path is not a regular file: {config_path}")
-    if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077:
-        raise ConfigError(
-            f"Configuration permissions are too broad at {config_path}; run chmod 600"
-        )
-    try:
-        raw = config_path.read_bytes()
-    except OSError as exc:
-        raise ConfigError(f"Cannot read configuration at {config_path}: {exc}") from exc
-    if len(raw) > MAX_CONFIG_BYTES:
-        raise ConfigError("Configuration file is unexpectedly large")
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ConfigError(f"Configuration is not valid UTF-8 JSON: {config_path}") from exc
-    return config_from_mapping(data)
+        overrides = _environment_overrides() if apply_env else {}
+        if "api_key" not in overrides:
+            raise ConfigError(
+                f"Configuration not found at {config_path}; run configure.py first"
+            ) from exc
+        data = {}
+    else:
+        if not stat.S_ISREG(info.st_mode):
+            raise ConfigError(f"Configuration path is not a regular file: {config_path}")
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077:
+            raise ConfigError(
+                f"Configuration permissions are too broad at {config_path}; run chmod 600"
+            )
+        try:
+            raw = config_path.read_bytes()
+        except OSError as exc:
+            raise ConfigError(f"Cannot read configuration at {config_path}: {exc}") from exc
+        if len(raw) > MAX_CONFIG_BYTES:
+            raise ConfigError("Configuration file is unexpectedly large")
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"Configuration is not valid UTF-8 JSON: {config_path}") from exc
+        if not isinstance(parsed, Mapping):
+            raise ConfigError("Configuration must be a JSON object")
+        parsed_data = dict(parsed)
+        if "api_key_protected" in parsed_data:
+            if parsed_data.get("api_key_protection") != WINDOWS_DPAPI_SCHEME:
+                raise ConfigError("Configuration uses an unsupported API key protection scheme")
+            protected_value = parsed_data.get("api_key_protected")
+            if not isinstance(protected_value, str):
+                raise ConfigError("Windows DPAPI API key payload must be a string")
+            parsed_data["api_key"] = _unprotect_api_key(protected_value)
+        data = parsed_data
+
+    merged = dict(data)
+    if apply_env:
+        merged.update(_environment_overrides())
+    return config_from_mapping(merged)
 
 
 def save_config(config: Config, path: Path | str | None = None) -> Path:
@@ -268,13 +445,7 @@ def save_config(config: Config, path: Path | str | None = None) -> Path:
             raise ConfigError(f"Cannot secure configuration directory {parent}: {exc}") from exc
 
     payload = json.dumps(
-        {
-            "base_url": config.base_url,
-            "api_key": config.api_key,
-            "model": config.model,
-            "output_dir": config.output_dir,
-            "timeout_seconds": config.timeout_seconds,
-        },
+        _config_payload(config),
         indent=2,
         ensure_ascii=True,
     ).encode("utf-8") + b"\n"
@@ -285,13 +456,15 @@ def save_config(config: Config, path: Path | str | None = None) -> Path:
             prefix=f".{config_path.name}.", dir=parent
         )
         temporary_path = Path(temporary_name)
-        os.fchmod(descriptor, 0o600)
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, config_path)
-        config_path.chmod(0o600)
+        if os.name == "posix":
+            config_path.chmod(0o600)
     except OSError as exc:
         raise ConfigError(f"Cannot write configuration at {config_path}: {exc}") from exc
     finally:
@@ -312,21 +485,68 @@ def classify_dimensions(width: int, height: int) -> str:
     return "4K"
 
 
-def parse_size(value: str) -> tuple[int, int]:
+def _size_violations(width: int, height: int) -> list[str]:
+    violations: list[str] = []
+    if width % SIZE_ALIGNMENT or height % SIZE_ALIGNMENT:
+        violations.append(f"both dimensions must be multiples of {SIZE_ALIGNMENT}")
+    if max(width, height) > MAX_IMAGE_EDGE:
+        violations.append(f"the longest edge must not exceed {MAX_IMAGE_EDGE}")
+    pixels = width * height
+    if pixels < MIN_IMAGE_PIXELS or pixels > MAX_IMAGE_PIXELS:
+        violations.append(
+            f"total pixels must be between {MIN_IMAGE_PIXELS} and {MAX_IMAGE_PIXELS}"
+        )
+    if min(width, height) <= 0 or max(width, height) > min(width, height) * MAX_ASPECT_RATIO:
+        violations.append(f"the aspect ratio must not exceed {MAX_ASPECT_RATIO}:1")
+    return violations
+
+
+def nearest_valid_size(width: int, height: int) -> tuple[int, int]:
+    target_width = max(width, 1)
+    target_height = max(height, 1)
+    best: tuple[float, int, int, int] | None = None
+    for candidate_width in range(SIZE_ALIGNMENT, MAX_IMAGE_EDGE + 1, SIZE_ALIGNMENT):
+        for candidate_height in range(SIZE_ALIGNMENT, MAX_IMAGE_EDGE + 1, SIZE_ALIGNMENT):
+            if _size_violations(candidate_width, candidate_height):
+                continue
+            distance = (
+                ((candidate_width - target_width) / target_width) ** 2
+                + ((candidate_height - target_height) / target_height) ** 2
+            )
+            area_delta = abs(candidate_width * candidate_height - width * height)
+            score = (distance, area_delta, candidate_width, candidate_height)
+            if best is None or score < best:
+                best = score
+    if best is None:  # Constants above always admit at least one size.
+        raise ConfigError("No legal image size can be suggested")
+    return best[2], best[3]
+
+
+def parse_size(value: str) -> tuple[int, int] | None:
+    if value.strip().lower() == "auto":
+        return None
     match = re.fullmatch(r"\s*(\d+)\s*[xX]\s*(\d+)\s*", value)
     if not match:
-        raise ConfigError("Size must use WIDTHxHEIGHT, for example 1024x1024")
+        raise ConfigError("Size must be auto or WIDTHxHEIGHT, for example 1024x1024")
     width, height = int(match.group(1)), int(match.group(2))
-    if not (64 <= width <= 16384 and 64 <= height <= 16384):
-        raise ConfigError("Image width and height must each be between 64 and 16384")
+    violations = _size_violations(width, height)
+    if violations:
+        suggested_width, suggested_height = nearest_valid_size(width, height)
+        raise ConfigError(
+            f"Invalid image size {width}x{height}: {'; '.join(violations)}. "
+            f"Nearest legal suggestion: {suggested_width}x{suggested_height}"
+        )
     return width, height
 
 
 def resolve_size(
     tier: str = "1K", orientation: str = "square", exact_size: str | None = None
-) -> tuple[str, str]:
+) -> tuple[str, str | None]:
     if exact_size:
-        width, height = parse_size(exact_size)
+        parsed = parse_size(exact_size)
+        if parsed is None:
+            return "auto", None
+        width, height = parsed
         normalized = f"{width}x{height}"
         return normalized, classify_dimensions(width, height)
     normalized_tier = tier.upper().strip()
@@ -349,6 +569,8 @@ def classify_http_error(status_code: int | None) -> str:
         return "not_found"
     if status_code == 429:
         return "rate_limit"
+    if status_code == 524:
+        return "edge_timeout"
     if status_code is not None and status_code >= 500:
         return "server_or_upstream"
     if status_code is None:
@@ -410,7 +632,9 @@ class ImageClient:
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.config.api_key}",
+                "Cache-Control": "no-store",
                 "Content-Type": content_type,
+                "Pragma": "no-cache",
                 "User-Agent": USER_AGENT,
             },
         )
@@ -661,9 +885,10 @@ def _atomic_write(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
-        path.chmod(0o644)
+        if os.name == "posix":
+            path.chmod(0o644)
     except OSError as exc:
-        raise ImageValidationError(f"Cannot save image at {path}: {exc}") from exc
+        raise ImageValidationError(f"Cannot save file at {path}: {exc}") from exc
     finally:
         if temporary_path is not None:
             try:
@@ -672,32 +897,126 @@ def _atomic_write(path: Path, data: bytes) -> None:
                 pass
 
 
+def _extension_for_format(image_format: str) -> str:
+    if image_format == "png":
+        return ".png"
+    if image_format == "jpeg":
+        return ".jpg"
+    if image_format == "webp":
+        return ".webp"
+    raise ConfigError(f"Unsupported image format for output path: {image_format}")
+
+
+def planned_output_paths(
+    output_path: Path | str, formats: Sequence[str]
+) -> list[Path]:
+    if not formats:
+        raise ConfigError("At least one output format is required")
+    selected = Path(output_path).expanduser().resolve()
+    if selected.exists() and selected.is_dir():
+        raise ConfigError(f"--output must be a file path, not a directory: {selected}")
+    supported_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+    if selected.suffix and selected.suffix.lower() not in supported_suffixes:
+        raise ConfigError("--output must omit its extension or use .png, .jpg, .jpeg, or .webp")
+
+    stem_path = selected.with_suffix("") if selected.suffix else selected
+    multiple = len(formats) > 1
+    paths: list[Path] = []
+    for index, image_format in enumerate(formats, start=1):
+        extension = _extension_for_format(image_format)
+        if (
+            not multiple
+            and selected.suffix.lower() in supported_suffixes
+            and (
+                selected.suffix.lower() == extension
+                or image_format == "jpeg" and selected.suffix.lower() == ".jpeg"
+            )
+        ):
+            paths.append(selected)
+            continue
+        suffix = f"-{index:02d}" if multiple else ""
+        paths.append(stem_path.with_name(f"{stem_path.name}{suffix}{extension}"))
+    return paths
+
+
+def _check_output_paths(paths: Sequence[Path], overwrite: bool) -> None:
+    for path in paths:
+        if path.exists():
+            if path.is_dir():
+                raise ImageValidationError(f"Output path is a directory: {path}")
+            if not overwrite:
+                raise ImageValidationError(
+                    f"Output file already exists: {path}; pass --overwrite to replace it"
+                )
+        if path.parent.exists() and not path.parent.is_dir():
+            raise ImageValidationError(f"Output parent is not a directory: {path.parent}")
+
+
+def preflight_output_path(
+    output_path: Path | str,
+    count: int,
+    output_format: str,
+    overwrite: bool = False,
+) -> list[Path]:
+    paths = planned_output_paths(output_path, [output_format] * count)
+    _check_output_paths(paths, overwrite)
+    return paths
+
+
 def save_response_images(
     client: ImageClient,
     response: Mapping[str, Any],
-    output_dir: Path | str,
+    output_dir: Path | str | None,
     operation: str,
+    *,
+    output_path: Path | str | None = None,
+    overwrite: bool = False,
+    protected_paths: Sequence[Path | str] = (),
 ) -> list[dict[str, Any]]:
     items = response.get("data")
     if not isinstance(items, list) or not items:
         raise ImageValidationError("Sub2API response contains no images in data[]")
-    directory = Path(output_dir).expanduser().resolve()
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ImageValidationError(f"Cannot create output directory {directory}: {exc}") from exc
-    if not directory.is_dir():
-        raise ImageValidationError(f"Output path is not a directory: {directory}")
+    if output_path is not None and output_dir is not None:
+        raise ConfigError("Use either output_path or output_dir, not both")
 
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    nonce = uuid.uuid4().hex[:8]
-    saved: list[dict[str, Any]] = []
+    decoded: list[tuple[bytes, ImageInfo]] = []
     for index, item in enumerate(items, start=1):
         if not isinstance(item, Mapping):
             raise ImageValidationError(f"Image result {index} is not an object")
         data = client.result_bytes(item)
         info = inspect_image(data)
-        path = directory / f"sub2api-{operation}-{stamp}-{nonce}-{index:02d}{info.extension}"
+        decoded.append((data, info))
+
+    if output_path is not None:
+        paths = planned_output_paths(output_path, [info.format for _, info in decoded])
+        _check_output_paths(paths, overwrite)
+        directories = {path.parent for path in paths}
+    else:
+        if output_dir is None:
+            raise ConfigError("An output directory or output file is required")
+        directory = Path(output_dir).expanduser().resolve()
+        if directory.exists() and not directory.is_dir():
+            raise ImageValidationError(f"Output path is not a directory: {directory}")
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        nonce = uuid.uuid4().hex[:8]
+        paths = [
+            directory / f"sub2api-{operation}-{stamp}-{nonce}-{index:02d}{info.extension}"
+            for index, (_, info) in enumerate(decoded, start=1)
+        ]
+        directories = {directory}
+
+    protected = {Path(path).expanduser().resolve() for path in protected_paths}
+    if any(path in protected for path in paths):
+        raise ImageValidationError("Output path must not replace a protected input file")
+
+    for directory in directories:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ImageValidationError(f"Cannot create output directory {directory}: {exc}") from exc
+
+    saved: list[dict[str, Any]] = []
+    for path, (data, info) in zip(paths, decoded):
         _atomic_write(path, data)
         saved.append(
             {
@@ -715,20 +1034,51 @@ def save_response_images(
     return saved
 
 
+def write_json_metadata(
+    path: Path | str, payload: Mapping[str, Any], *, overwrite: bool = False
+) -> Path:
+    metadata_path = Path(path).expanduser().resolve()
+    _check_output_paths([metadata_path], overwrite)
+    try:
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ImageValidationError(
+            f"Cannot create metadata directory {metadata_path.parent}: {exc}"
+        ) from exc
+    data = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    _atomic_write(metadata_path, data)
+    return metadata_path
+
+
 def safe_response_metadata(response: Mapping[str, Any]) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     for name in ("model", "size", "output_format", "quality", "background", "created"):
         value = response.get(name)
-        if isinstance(value, (str, int, float, bool)):
+        if _is_safe_metadata_scalar(name, value):
             metadata[name] = value
     usage = response.get("usage")
     if isinstance(usage, Mapping):
         metadata["usage"] = {
             key: value
             for key, value in usage.items()
-            if isinstance(key, str) and isinstance(value, (str, int, float, bool))
+            if isinstance(key, str) and _is_safe_metadata_scalar(key, value)
         }
     return metadata
+
+
+def _is_safe_metadata_scalar(name: str, value: Any) -> bool:
+    normalized_name = name.lower()
+    if normalized_name in {"url", "b64_json"} or normalized_name.endswith("_url"):
+        return False
+    if not isinstance(value, (str, int, float, bool)):
+        return False
+    if isinstance(value, str):
+        if len(value) > 4096 or value.lower().startswith("data:"):
+            return False
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() in {"http", "https"}:
+            return False
+    return True
 
 
 def public_error(exc: Exception) -> dict[str, Any]:

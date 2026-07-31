@@ -13,6 +13,7 @@ import unittest
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,7 @@ from image_client import (  # noqa: E402
     inspect_image,
     load_config,
     normalize_base_url,
+    parse_size,
     resolve_size,
     save_config,
 )
@@ -77,6 +79,7 @@ class MockState:
         self.requests: list[dict[str, object]] = []
         self.image = make_png(1024, 1024)
         self.response_mode = "b64"
+        self.response_count = 1
         self.error_status: int | None = None
 
 
@@ -123,7 +126,12 @@ class MockHandler(BaseHTTPRequestHandler):
                 "created": 1_700_000_000,
                 "model": "gpt-image-2",
                 "size": "1024x1024",
-                "data": [item],
+                "signed_result_url": "https://signed.example/image?token=do-not-store",
+                "usage": {
+                    "image_count": self.server.state.response_count,
+                    "result_url": "https://signed.example/usage?token=do-not-store",
+                },
+                "data": [dict(item) for _ in range(self.server.state.response_count)],
             }
         ).encode()
         self.send_response(200)
@@ -177,7 +185,14 @@ class ConfigTests(unittest.TestCase):
             config_path = Path(directory) / "private" / "config.json"
             config = Config("https://example.test/v1", "secret-test-key")
             save_config(config, config_path)
-            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+            else:
+                stored = json.loads(config_path.read_text(encoding="utf-8"))
+                self.assertNotIn("api_key", stored)
+                self.assertEqual(
+                    stored["api_key_protection"], "windows-dpapi-current-user"
+                )
             self.assertEqual(load_config(config_path), config)
 
             result = subprocess.run(
@@ -199,13 +214,59 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(config_path)
 
+    def test_dedicated_environment_overrides_without_generic_openai_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.json"
+            with patch.dict(
+                os.environ,
+                {
+                    "SUB2API_IMAGE_API_KEY": "secret-env-key",
+                    "SUB2API_IMAGE_BASE_URL": "https://images.example.test",
+                    "SUB2API_IMAGE_MODEL": "image-model-env",
+                    "SUB2API_IMAGE_TIMEOUT_SECONDS": "42",
+                    "OPENAI_API_KEY": "must-not-be-used",
+                },
+                clear=True,
+            ):
+                config = load_config(missing)
+            self.assertEqual(config.api_key, "secret-env-key")
+            self.assertEqual(config.base_url, "https://images.example.test/v1")
+            self.assertEqual(config.model, "image-model-env")
+            self.assertEqual(config.timeout_seconds, 42)
+
+            with patch.dict(
+                os.environ,
+                {"OPENAI_API_KEY": "generic-only"},
+                clear=True,
+            ):
+                with self.assertRaises(ConfigError):
+                    load_config(missing)
+
 
 class SizeAndFormatTests(unittest.TestCase):
     def test_size_presets_match_billing_tiers(self) -> None:
-        self.assertEqual(resolve_size("1K", "landscape"), ("1024x576", "1K"))
+        self.assertEqual(resolve_size("1K", "landscape"), ("1024x640", "1K"))
+        self.assertEqual(resolve_size("1K", "portrait"), ("640x1024", "1K"))
         self.assertEqual(resolve_size("2K", "portrait"), ("1152x2048", "2K"))
+        self.assertEqual(resolve_size("4K", "square"), ("2880x2880", "4K"))
         self.assertEqual(resolve_size("4K", "landscape"), ("3840x2160", "4K"))
         self.assertEqual(resolve_size(exact_size="1536x1024"), ("1536x1024", "2K"))
+        self.assertEqual(resolve_size(exact_size="auto"), ("auto", None))
+
+    def test_size_constraints_and_nearest_suggestions(self) -> None:
+        self.assertEqual(parse_size("1024x640"), (1024, 640))
+        self.assertEqual(parse_size("2880x2880"), (2880, 2880))
+        self.assertIsNone(parse_size("auto"))
+        for invalid in (
+            "1024x576",
+            "3840x3840",
+            "1000x1000",
+            "3840x1024",
+            "4096x2048",
+        ):
+            with self.subTest(size=invalid), self.assertRaises(ConfigError) as caught:
+                parse_size(invalid)
+            self.assertIn("Nearest legal suggestion", str(caught.exception))
 
     def test_png_jpeg_and_webp_dimensions(self) -> None:
         png = inspect_image(make_png(17, 23))
@@ -240,6 +301,8 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(captured["path"], "/v1/images/generations")
             headers = captured["headers"]
             self.assertEqual(headers["authorization"], "Bearer secret-test-key")
+            self.assertEqual(headers["cache-control"], "no-store")
+            self.assertEqual(headers["pragma"], "no-cache")
             request_payload = json.loads(captured["body"])
             self.assertEqual(request_payload["size"], "1024x1024")
             self.assertEqual(request_payload["response_format"], "b64_json")
@@ -257,8 +320,22 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertFalse(report["ok"])
             self.assertFalse(report["tier_match"])
             self.assertFalse(report["exact_size_match"])
-            self.assertEqual(report["error"]["category"], "resolution_mismatch")
+            self.assertEqual(report["error"]["category"], "response_mismatch")
             self.assertTrue(Path(report["images"][0]["path"]).exists())
+
+    def test_auto_size_skips_dimension_claims(self) -> None:
+        with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            report = generate_images(
+                self.config(server),
+                prompt="draw",
+                exact_size="auto",
+                output_dir=directory,
+            )
+            self.assertTrue(report["ok"])
+            self.assertIsNone(report["requested_tier"])
+            self.assertIsNone(report["tier_match"])
+            self.assertIsNone(report["orientation_match"])
+            self.assertIsNone(report["exact_size_match"])
 
     def test_error_is_classified_and_secret_is_redacted(self) -> None:
         with MockServer() as server:
@@ -269,15 +346,25 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(error["category"], "authentication")
             self.assertNotIn("secret-test-key", error["message"])
 
+            server.state.error_status = 524
+            with self.assertRaises(APIError) as timeout:
+                ImageClient(self.config(server)).generate({"prompt": "draw"})
+            timeout_error = timeout.exception.as_dict()["error"]
+            self.assertEqual(timeout_error["category"], "edge_timeout")
+            self.assertFalse(timeout_error["retry_safe"])
+            self.assertIn("direct base URL", timeout_error["action"])
+
     def test_edit_multipart_and_mask_validation(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
+            second_source = Path(directory) / "second.png"
             mask = Path(directory) / "mask.png"
             source.write_bytes(make_png(1024, 1024))
+            second_source.write_bytes(make_png(1024, 1024))
             mask.write_bytes(make_png(1024, 1024))
             report = edit_image(
                 self.config(server),
-                image_path=source,
+                image_path=[source, second_source],
                 mask_path=mask,
                 prompt="replace background",
                 output_dir=Path(directory) / "out",
@@ -287,8 +374,11 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(captured["path"], "/v1/images/edits")
             body = captured["body"]
             self.assertIn(b'name="image"; filename="source.png"', body)
+            self.assertIn(b'name="image"; filename="second.png"', body)
+            self.assertEqual(body.count(b'name="image"; filename='), 2)
             self.assertIn(b'name="mask"; filename="mask.png"', body)
             self.assertIn(b'name="prompt"', body)
+            self.assertEqual(len(report["input_images"]), 2)
 
             mismatch = Path(directory) / "bad-mask.png"
             mismatch.write_bytes(make_png(512, 512))
@@ -299,6 +389,182 @@ class ClientIntegrationTests(unittest.TestCase):
                     mask_path=mismatch,
                     prompt="replace background",
                     output_dir=Path(directory) / "unused",
+                )
+
+            request_count = len(server.state.requests)
+            with self.assertRaises(ConfigError):
+                edit_image(
+                    self.config(server),
+                    image_path=source,
+                    prompt="in-place replacement",
+                    output_path=source,
+                    overwrite=True,
+                    dry_run=True,
+                )
+            with self.assertRaises(ConfigError):
+                edit_image(
+                    self.config(server),
+                    image_path=source,
+                    prompt="metadata collision",
+                    metadata=source,
+                    overwrite=True,
+                    dry_run=True,
+                )
+            self.assertEqual(len(server.state.requests), request_count)
+
+    def test_exact_output_multi_numbering_and_overwrite_protection(self) -> None:
+        with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            server.state.response_count = 2
+            output = Path(directory) / "result.png"
+            report = generate_images(
+                self.config(server),
+                prompt="two tiles",
+                count=2,
+                output_path=output,
+            )
+            self.assertTrue(report["ok"])
+            paths = [Path(image["path"]) for image in report["images"]]
+            self.assertEqual([path.name for path in paths], ["result-01.png", "result-02.png"])
+            self.assertTrue(all(path.exists() for path in paths))
+
+            request_count = len(server.state.requests)
+            with self.assertRaises(ImageValidationError):
+                generate_images(
+                    self.config(server),
+                    prompt="two tiles",
+                    count=2,
+                    output_path=output,
+                )
+            self.assertEqual(len(server.state.requests), request_count)
+
+            replaced = generate_images(
+                self.config(server),
+                prompt="two replacement tiles",
+                count=2,
+                output_path=output,
+                overwrite=True,
+            )
+            self.assertTrue(replaced["ok"])
+
+            collision = Path(directory) / "collision.png"
+            with self.assertRaises(ConfigError):
+                generate_images(
+                    self.config(server),
+                    prompt="collision",
+                    output_path=collision,
+                    metadata=collision,
+                    overwrite=True,
+                    dry_run=True,
+                )
+
+    def test_count_and_format_mismatches_are_failures(self) -> None:
+        with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            report = generate_images(
+                self.config(server),
+                prompt="draw",
+                count=2,
+                output_format="webp",
+                output_dir=directory,
+            )
+            self.assertFalse(report["ok"])
+            self.assertFalse(report["count_match"])
+            self.assertFalse(report["format_match"])
+            self.assertEqual(report["error"]["category"], "response_mismatch")
+            self.assertEqual(report["error"]["mismatches"], ["count", "format"])
+
+    def test_options_metadata_and_signed_url_redaction(self) -> None:
+        with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            metadata = Path(directory) / "result.json"
+            report = generate_images(
+                self.config(server),
+                prompt="transparent icon",
+                background="transparent",
+                moderation="low",
+                timeout_seconds=33,
+                output_dir=Path(directory) / "images",
+                metadata=metadata,
+            )
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["timeout_seconds"], 33)
+            self.assertEqual(report["metadata_path"], str(metadata.resolve()))
+
+            request_payload = json.loads(server.state.requests[0]["body"])
+            self.assertEqual(request_payload["background"], "transparent")
+            self.assertEqual(request_payload["moderation"], "low")
+
+            document = json.loads(metadata.read_text(encoding="utf-8"))
+            serialized = json.dumps(document)
+            self.assertEqual(document["request"]["prompt"], "transparent icon")
+            encoded_image = base64.b64encode(server.state.image).decode()
+            self.assertNotIn(encoded_image, serialized)
+            self.assertNotIn("signed_result_url", serialized)
+            self.assertNotIn("result_url", serialized)
+            self.assertNotIn("do-not-store", serialized)
+            self.assertNotIn("secret-test-key", serialized)
+            self.assertEqual(document["api_metadata"]["usage"]["image_count"], 1)
+
+    def test_prompt_file_dry_run_has_no_network_or_output(self) -> None:
+        with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            prompt_path = Path(directory) / "prompt.txt"
+            output_path = Path(directory) / "never-created.png"
+            save_config(self.config(server), config_path)
+            prompt_path.write_text("A clean product photo", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "generate.py"),
+                    "--prompt-file",
+                    str(prompt_path),
+                    "--size",
+                    "auto",
+                    "--output",
+                    str(output_path),
+                    "--dry-run",
+                    "--config",
+                    str(config_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["dry_run"])
+            self.assertFalse(payload["network_request_sent"])
+            self.assertFalse(payload["files_written"])
+            self.assertEqual(payload["request"]["prompt"], "A clean product photo")
+            self.assertEqual(server.state.requests, [])
+            self.assertFalse(output_path.exists())
+
+    def test_output_compression_validation_and_dry_run(self) -> None:
+        with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            report = generate_images(
+                self.config(server),
+                prompt="compressed",
+                output_path=Path(directory) / "result.webp",
+                output_compression=75,
+                dry_run=True,
+            )
+            self.assertEqual(report["output_format"], "webp")
+            self.assertEqual(report["request"]["output_compression"], 75)
+            self.assertEqual(server.state.requests, [])
+            with self.assertRaises(ConfigError):
+                generate_images(
+                    self.config(server),
+                    prompt="invalid",
+                    output_format="png",
+                    output_compression=75,
+                    dry_run=True,
+                )
+            with self.assertRaises(ConfigError):
+                generate_images(
+                    self.config(server),
+                    prompt="conflicting format",
+                    output_path=Path(directory) / "result.webp",
+                    output_format="png",
+                    dry_run=True,
                 )
 
     def test_smoke_test_cli(self) -> None:
