@@ -17,7 +17,7 @@ from image_client import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_TIMEOUT_SECONDS,
     LEGACY_CONFIG_PATH,
-    Config,
+    ConfigState,
     ConfigError,
     config_protection,
     config_from_mapping,
@@ -25,6 +25,7 @@ from image_client import (
     load_config,
     print_json,
     public_error,
+    read_config_state,
     save_config,
     selected_config_path,
 )
@@ -82,18 +83,29 @@ def configure(
 ) -> dict[str, object]:
     path = selected_config_path(args.config)
     existing_path = discover_config_path(args.config)
-    existing: Config | None = None
+    existing: ConfigState | None = None
     if existing_path.exists():
-        existing = load_config(existing_path, apply_env=False)
+        existing = read_config_state(existing_path)
 
     if not sys.stdin.isatty():
         raise ConfigError("Interactive terminal required to enter the API key")
 
     label = "Sub2API user API key (input visible)"
-    if existing is not None:
+    if existing is not None and existing.api_key is not None:
         label += " [press Enter to keep the existing key]"
+    elif existing is not None and existing.credential_error is not None:
+        label += " [replacement required; the existing credential is unreadable]"
     entered_key = key_input_fn(f"{label}: ")
-    api_key = entered_key if entered_key else (existing.api_key if existing else "")
+    if entered_key:
+        api_key = entered_key
+    elif existing is not None and existing.api_key is not None:
+        api_key = existing.api_key
+    elif existing is not None and existing.credential_error is not None:
+        raise ConfigError(
+            "The existing Windows credential cannot be decrypted; enter a replacement API key"
+        )
+    else:
+        api_key = ""
 
     mapping = {
         "base_url": args.base_url
@@ -108,9 +120,18 @@ def configure(
     }
     config = config_from_mapping(mapping)
     written_path = save_config(config, path)
+    if load_config(written_path, apply_env=False) != config:
+        raise ConfigError("Saved configuration verification failed")
     result = config.public_dict(written_path)
     result["ok"] = True
     result["credential_protection"] = config_protection()
+    if existing is not None and existing.credential_protection is not None:
+        result["previous_credential_protection"] = existing.credential_protection
+        result["credential_migrated"] = (
+            existing.credential_protection != result["credential_protection"]
+        )
+    if existing is not None and existing.credential_error is not None:
+        result["credential_replaced"] = True
     if existing_path != path and existing_path.exists():
         result["migrated_from"] = str(existing_path.resolve())
         result["legacy_config_retained"] = True
@@ -126,11 +147,16 @@ def main() -> int:
             result = remove_config(args.config)
         elif args.show:
             config_path = discover_config_path(args.config)
+            state = read_config_state(config_path) if config_path.exists() else None
+            if state is not None and state.credential_error is not None:
+                raise state.credential_error
             config = load_config(config_path if config_path.exists() else args.config)
             result = config.public_dict(config_path if config_path.exists() else None)
             result["ok"] = True
             if config_path.exists():
-                result["credential_protection"] = config_protection()
+                result["credential_protection"] = (
+                    state.credential_protection if state is not None else config_protection()
+                )
                 if os.name == "posix":
                     result["permissions"] = oct(os.stat(config_path).st_mode & 0o777)
                 result["source"] = "file_with_environment_overrides"

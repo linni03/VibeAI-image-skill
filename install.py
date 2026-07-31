@@ -33,12 +33,14 @@ from image_client import (  # noqa: E402
     DEFAULT_TIMEOUT_SECONDS,
     LEGACY_CONFIG_PATH,
     Config,
+    ConfigState,
     ConfigError,
     config_protection,
     config_from_mapping,
     default_config_path,
     discover_config_path,
     load_config,
+    read_config_state,
     save_config,
 )
 
@@ -276,15 +278,15 @@ def finalize_install(result: InstallResult) -> InstallResult:
     )
 
 
-def read_existing_config(path: Path) -> Config | None:
+def read_existing_config(path: Path) -> ConfigState | None:
     expanded = path.expanduser()
     if not _path_exists(expanded):
         return None
-    return load_config(expanded, apply_env=False)
+    return read_config_state(expanded)
 
 
 def prompt_config(
-    existing: Config | None,
+    existing: Config | ConfigState | None,
     *,
     base_url: str | None = None,
     model: str | None = None,
@@ -301,10 +303,19 @@ def prompt_config(
         selected_base_url = base_url
 
     key_label = "Sub2API 生图 API Key（输入可见）"
-    if existing is not None:
+    if existing is not None and existing.api_key is not None:
         key_label += " [直接回车保留现有密钥]"
+    elif isinstance(existing, ConfigState) and existing.credential_error is not None:
+        key_label += " [旧密钥无法解密，必须输入替换密钥]"
     entered_key = key_input_fn(f"{key_label}: ")
-    selected_key = entered_key if entered_key else (existing.api_key if existing else "")
+    if entered_key:
+        selected_key = entered_key
+    elif existing is not None and existing.api_key is not None:
+        selected_key = existing.api_key
+    elif isinstance(existing, ConfigState) and existing.credential_error is not None:
+        raise ConfigError("旧 Windows 密钥无法解密，请输入新的 Sub2API API Key")
+    else:
+        selected_key = ""
 
     return config_from_mapping(
         {
@@ -350,6 +361,11 @@ def main() -> int:
         print("直接按回车即可采用方括号中的默认值。\n")
 
         existing = read_existing_config(existing_config_path)
+        if existing is not None and existing.credential_error is not None:
+            print(
+                "[WARN] 现有 Windows 密钥无法在当前安全上下文中解密；"
+                "将保留非敏感配置并要求输入替换密钥"
+            )
         config = prompt_config(
             existing,
             base_url=args.base_url,
@@ -365,6 +381,8 @@ def main() -> int:
         )
         try:
             written_config = save_config(config, config_path)
+            if load_config(written_config, apply_env=False) != config:
+                raise ConfigError("Saved configuration verification failed")
         except BaseException as exc:
             try:
                 rollback_install(result)
@@ -384,12 +402,23 @@ def main() -> int:
             print(f"[OK] 已从旧配置迁移：{existing_config_path.resolve()}")
             print("[INFO] 旧配置文件已保留，可在确认新版本正常后手动删除")
         if os.name == "nt":
-            print("[OK] API Key 保护：Windows DPAPI（仅当前 Windows 用户可解密）")
+            print("[OK] API Key 保护：Windows DPAPI LocalMachine + 用户目录 ACL")
         else:
             print("[OK] API Key 保护：配置文件权限 0600")
         print(f"[OK] Base URL: {config.base_url}")
         print(f"[OK] 模型：{config.model}")
         print(f"[OK] 保护方式：{config_protection()}")
+        if (
+            existing is not None
+            and existing.credential_protection is not None
+            and existing.credential_protection != config_protection()
+        ):
+            print(
+                f"[OK] 密钥保护已迁移：{existing.credential_protection}"
+                f" -> {config_protection()}"
+            )
+        if existing is not None and existing.credential_error is not None:
+            print("[OK] 无法解密的旧密钥已由新输入密钥替换")
         print("[OK] API Key 已受保护保存（输入时在终端中可见）")
         if result.backup_path is not None:
             print(f"[WARN] 旧安装备份未能清理，保留于：{result.backup_path}")

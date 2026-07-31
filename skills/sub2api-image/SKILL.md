@@ -34,7 +34,7 @@ Use an interactive terminal so the key never appears in process arguments. Key i
 <python> <skill-dir>/scripts/configure.py
 ```
 
-On native Windows, store configuration at `%CODEX_HOME%\sub2api-image\config.json`, falling back to `%USERPROFILE%\.codex\sub2api-image\config.json`, and encrypt the API key with current-user DPAPI. The client can read the legacy `%USERPROFILE%\.config\sub2api-image\config.json`; running the installer or interactive configure command migrates it while retaining the old file. On macOS, Linux, and WSL, use `~/.config/sub2api-image/config.json` with mode `0600`.
+On native Windows, store configuration at `%CODEX_HOME%\sub2api-image\config.json`, falling back to `%USERPROFILE%\.codex\sub2api-image\config.json`. Encrypt the API key with machine-scoped DPAPI so Codex's dedicated Windows sandbox users can decrypt it, and rely on the user-profile/Codex Home ACL to restrict ciphertext access. Never place the config in a shared directory. The client can read old current-user DPAPI and legacy `%USERPROFILE%\.config\sub2api-image\config.json` configurations; running the installer or interactive configure command migrates readable credentials and retains a legacy-path file. If an old credential cannot be decrypted, require a replacement key while preserving validated non-secret settings. On macOS, Linux, and WSL, use `~/.config/sub2api-image/config.json` with mode `0600`.
 
 Never print, repeat, summarize, or place the key in a command. Warn that keys pasted into chat may remain in session records; ask the user to run the interactive command locally.
 
@@ -80,6 +80,7 @@ Run `<python> <skill-dir>/scripts/smoke_test.py` only when a real paid 1K genera
 
 - Keep one Sub2API image-enabled user key per user. Never use an upstream account key.
 - Never put a key in Git, command arguments, URLs, logs, metadata, filenames, or replies.
+- On native Windows, treat the config file ACL as part of credential protection; machine-scoped DPAPI is machine-bound rather than user-bound.
 - If the sandbox blocks a clear request, request one scoped approval for the actual generation or edit command. Do not use `--show` or `--dry-run` as a permission probe.
 - Never retry authentication, permission, validation, response-mismatch, network-timeout, or HTTP 524 failures automatically.
 - Treat 524 and client timeouts as ambiguous paid outcomes. Check the image-only direct Base URL, proxy/origin timeouts, request ID, and usage logs before asking for retry approval.

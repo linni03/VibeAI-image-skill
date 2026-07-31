@@ -18,6 +18,8 @@ installer = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = installer
 SPEC.loader.exec_module(installer)
 
+from image_client import CredentialDecryptionError  # noqa: E402
+
 
 class InstallerTests(unittest.TestCase):
     def test_fresh_install_and_update_replace_the_skill_cleanly(self) -> None:
@@ -65,7 +67,7 @@ class InstallerTests(unittest.TestCase):
                 stored = json.loads(written.read_text(encoding="utf-8"))
                 self.assertNotIn("api_key", stored)
                 self.assertEqual(
-                    stored["api_key_protection"], "windows-dpapi-current-user"
+                    stored["api_key_protection"], "windows-dpapi-local-machine"
                 )
             self.assertNotIn("sk-image-test", config.public_dict()["api_key"])
 
@@ -83,6 +85,36 @@ class InstallerTests(unittest.TestCase):
             key_input_fn=lambda _prompt: "",
         )
         self.assertEqual(config, existing)
+
+    def test_prompt_config_requires_replacement_for_unreadable_key(self) -> None:
+        failure = CredentialDecryptionError("unreadable")
+        existing = installer.ConfigState(
+            base_url="https://images.example.test/v1",
+            api_key=None,
+            model="existing-model",
+            output_dir="existing-output",
+            timeout_seconds=321,
+            credential_protection="windows-dpapi-current-user",
+            credential_error=failure,
+        )
+
+        with self.assertRaises(installer.ConfigError):
+            installer.prompt_config(
+                existing,
+                input_fn=lambda _prompt: "",
+                key_input_fn=lambda _prompt: "",
+            )
+
+        config = installer.prompt_config(
+            existing,
+            input_fn=lambda _prompt: "",
+            key_input_fn=lambda _prompt: "replacement-secret",
+        )
+        self.assertEqual(config.base_url, existing.base_url)
+        self.assertEqual(config.api_key, "replacement-secret")
+        self.assertEqual(config.model, existing.model)
+        self.assertEqual(config.output_dir, existing.output_dir)
+        self.assertEqual(config.timeout_seconds, existing.timeout_seconds)
 
     def test_validate_skill_source_requires_implicit_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

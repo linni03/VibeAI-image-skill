@@ -28,9 +28,9 @@ cd vibeai-image-skill
 .\install.bat
 ```
 
-Windows 原生环境会使用当前用户的 DPAPI 加密 API Key。配置保存在 `%CODEX_HOME%\sub2api-image\config.json`；未设置 `CODEX_HOME` 时使用 `%USERPROFILE%\.codex\sub2api-image\config.json`。配置文件中不会保存明文 Key，也不会使用无效的 Unix `0600` 权限声明。
+Windows 原生环境会使用机器作用域 DPAPI 加密 API Key，使 Codex `elevated` 沙箱使用的专用低权限用户也能解密。配置保存在 `%CODEX_HOME%\sub2api-image\config.json`；未设置 `CODEX_HOME` 时使用 `%USERPROFILE%\.codex\sub2api-image\config.json`。配置文件中不会保存明文 Key，机密性同时依赖用户目录的 Windows ACL；不要把配置复制到共享目录。
 
-从旧版本更新时，安装器会读取 `%USERPROFILE%\.config\sub2api-image\config.json` 并把配置写入新位置。旧文件会暂时保留，确认新版正常后可以手动删除。
+从旧版本更新时，安装器会兼容旧的当前用户 DPAPI 配置，并读取 `%USERPROFILE%\.config\sub2api-image\config.json` 后写入新位置。旧 Key 可解时会自动迁移；确实无法解密时，安装器会保留 Base URL、模型、输出目录和超时设置，并要求输入替换 Key。旧路径文件会暂时保留，确认新版正常后可以手动删除。
 
 ## macOS、Linux 和 WSL2 安装
 
@@ -54,9 +54,10 @@ Sub2API 生图 API Key（输入可见）:
 - 使用默认 Base URL：直接按回车
 - 使用其他 Sub2API 地址：输入地址后按回车
 - API Key 输入内容会在终端中显示，便于确认输入或粘贴是否成功；请确保周围无人查看终端
-- 已经配置过时，可以直接按回车保留现有 Key
+- 已经配置且旧 Key 可以读取时，可以直接按回车保留现有 Key
+- 如果提示旧 Key 无法解密，必须输入替换 Key；空回车不会覆盖原配置
 
-Skill 会安装到 `$CODEX_HOME/skills/sub2api-image`；未设置 `CODEX_HOME` 时使用 `~/.codex/skills/sub2api-image`。Windows 配置保存在 `$CODEX_HOME/sub2api-image/config.json`，macOS、Linux 和 WSL2 配置保存在 `~/.config/sub2api-image/config.json`。输入虽然可见，但保存后仍受 Windows DPAPI 加密或 `0600` 文件权限保护。
+Skill 会安装到 `$CODEX_HOME/skills/sub2api-image`；未设置 `CODEX_HOME` 时使用 `~/.codex/skills/sub2api-image`。Windows 配置保存在 `$CODEX_HOME/sub2api-image/config.json`，并受机器作用域 DPAPI 与 Windows ACL 共同保护；macOS、Linux 和 WSL2 配置保存在 `~/.config/sub2api-image/config.json`，权限为 `0600`。
 
 安装和配置不会生成图片、访问图像 API 或产生生图费用。安装器会暂存新版本，并在配置失败时恢复原来的 Skill，避免留下半安装状态。
 
@@ -127,6 +128,8 @@ git pull
 .\install.bat
 ```
 
+Windows 旧版的 `windows-dpapi-current-user` 配置会在这一步迁移为 `windows-dpapi-local-machine`。迁移后重启 Codex 或新建会话。
+
 macOS、Linux 或 WSL2：
 
 ```bash
@@ -139,7 +142,8 @@ sh install.sh
 - **Windows 提示找不到 Python**：从 [Python 官网](https://www.python.org/downloads/windows/) 安装 Python 3.10 或更高版本，然后重新双击 `install.bat`。
 - **Codex 找不到 Skill**：重启 Codex 或新建会话，并尝试显式写 `$sub2api-image`。
 - **提示未配置或认证失败**：重新运行安装器，检查 Base URL、API Key，以及该 Key 所属用户组是否已启用图像生成功能。
+- **Windows 提示 `credential_decryption`**：先更新仓库并重新运行 `install.bat`。安装器会自动迁移可读取的旧 Key；旧 Key 确实不可读时会要求输入替换 Key，不需要先删除配置文件。
 - **Windows 权限审批服务返回 502**：在 `%USERPROFILE%\.codex\config.toml` 设置 `approvals_reviewer = "user"` 后重启 Codex，避免把本机审批交给自动审核；也可以对最近一次自动审核拒绝使用 `/approve` 重试一次。
 - **图片目录仍要求写入审批**：用 `/status` 检查实际 Pictures 路径是否已经出现在 writable roots，并确认路径与 `[Environment]::GetFolderPath('MyPictures')` 的输出一致。
-- **API Key 是否安全**：Windows 使用当前用户 DPAPI 加密；macOS、Linux 和 WSL2 使用 `0600` 配置文件。不要把 Key 粘贴到 Codex 对话、命令参数、URL、Git 仓库或日志里。
+- **API Key 是否安全**：Windows 使用机器作用域 DPAPI 加密，并依赖用户目录 ACL 限制密文读取；同一台机器上能读取该配置文件的账户也能解密，因此不要移动到共享目录。macOS、Linux 和 WSL2 使用 `0600` 配置文件。不要把 Key 粘贴到 Codex 对话、命令参数、URL、Git 仓库或日志里。
 - **是否会产生费用**：安装和配置不会产生费用；只有实际生成或编辑图片时才会消耗 Sub2API 额度。

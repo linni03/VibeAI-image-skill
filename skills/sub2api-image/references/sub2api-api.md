@@ -39,6 +39,8 @@ Treat size, tier, orientation, image count, or output format mismatch as a faile
 | `524` | `edge_timeout` | Check direct image ingress, proxy/origin timeouts, request ID, and usage before retry approval |
 | other `5xx` | `server_or_upstream` | Report the safe server message and request ID |
 
+`credential_decryption` is a local pre-request failure, not an API status. Report its configuration path, DPAPI error code when available, and stored protection scheme. Update or reconfigure the skill; preserve validated non-secret settings, and require a replacement key only when the old credential cannot be migrated.
+
 Timeouts are ambiguous paid outcomes: the upstream might finish after the client disconnects. Never retry automatically.
 
 ## Billing Verification

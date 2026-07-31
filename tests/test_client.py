@@ -22,12 +22,14 @@ SCRIPTS = REPO_ROOT / "skills" / "sub2api-image" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import configure as configure_cli  # noqa: E402
+import image_client  # noqa: E402
 from edit import edit_image  # noqa: E402
 from generate import generate_images  # noqa: E402
 from image_client import (  # noqa: E402
     APIError,
     Config,
     ConfigError,
+    CredentialDecryptionError,
     ImageClient,
     ImageValidationError,
     default_config_path,
@@ -38,6 +40,8 @@ from image_client import (  # noqa: E402
     parse_size,
     pictures_directory,
     pictures_output,
+    public_error,
+    read_config_state,
     resolve_size,
     save_config,
 )
@@ -311,7 +315,7 @@ class ConfigTests(unittest.TestCase):
                 stored = json.loads(config_path.read_text(encoding="utf-8"))
                 self.assertNotIn("api_key", stored)
                 self.assertEqual(
-                    stored["api_key_protection"], "windows-dpapi-current-user"
+                    stored["api_key_protection"], "windows-dpapi-local-machine"
                 )
             self.assertEqual(load_config(config_path), config)
 
@@ -324,6 +328,227 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("secret-test-key", result.stdout + result.stderr)
             self.assertEqual(json.loads(result.stdout)["api_key"], "<configured>")
+
+    def test_windows_local_machine_payload_round_trip(self) -> None:
+        config = Config("https://example.test/v1", "secret-test-key")
+        calls: list[tuple[bool, bool]] = []
+
+        def fake_dpapi(
+            data: bytes,
+            *,
+            protect: bool,
+            machine_scope: bool = False,
+        ) -> bytes:
+            calls.append((protect, machine_scope))
+            return b"encrypted" if protect else b"secret-test-key"
+
+        with (
+            patch("image_client.os.name", "nt"),
+            patch("image_client._windows_dpapi", side_effect=fake_dpapi),
+        ):
+            payload = image_client._config_payload(config)
+
+        self.assertNotIn("api_key", payload)
+        self.assertEqual(
+            payload["api_key_protection"], "windows-dpapi-local-machine"
+        )
+        self.assertEqual(calls, [(True, True), (False, False)])
+
+    def test_current_user_dpapi_config_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "https://images.example.test/v1",
+                        "model": "legacy-model",
+                        "output_dir": "legacy-output",
+                        "timeout_seconds": 321,
+                        "api_key_protection": "windows-dpapi-current-user",
+                        "api_key_protected": base64.b64encode(b"encrypted").decode(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+
+            with patch(
+                "image_client._unprotect_api_key",
+                return_value="legacy-secret",
+            ):
+                state = read_config_state(config_path)
+
+            self.assertEqual(state.api_key, "legacy-secret")
+            self.assertEqual(
+                state.credential_protection, "windows-dpapi-current-user"
+            )
+            self.assertIsNone(state.credential_error)
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI migration check")
+    def test_real_current_user_dpapi_config_migrates_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            protected = image_client._protect_api_key(
+                "legacy-secret",
+                image_client.WINDOWS_DPAPI_CURRENT_USER_SCHEME,
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "https://images.example.test/v1",
+                        "api_key_protection": "windows-dpapi-current-user",
+                        "api_key_protected": protected,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = read_config_state(config_path)
+            self.assertEqual(state.api_key, "legacy-secret")
+            migrated = state.with_api_key(state.api_key or "")
+            save_config(migrated, config_path)
+            stored = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                stored["api_key_protection"], "windows-dpapi-local-machine"
+            )
+            self.assertEqual(load_config(config_path, apply_env=False), migrated)
+
+    def test_unreadable_dpapi_config_preserves_public_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "https://images.example.test/v1",
+                        "model": "preserved-model",
+                        "output_dir": "preserved-output",
+                        "timeout_seconds": 321,
+                        "api_key_protection": "windows-dpapi-current-user",
+                        "api_key_protected": base64.b64encode(b"encrypted").decode(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+            failure = CredentialDecryptionError(
+                "Windows DPAPI could not unprotect the API key (error 13)",
+                error_code=13,
+            )
+
+            with patch("image_client._unprotect_api_key", side_effect=failure):
+                state = read_config_state(config_path)
+                with self.assertRaises(CredentialDecryptionError):
+                    load_config(config_path, apply_env=False)
+
+            self.assertIsNone(state.api_key)
+            self.assertEqual(state.base_url, "https://images.example.test/v1")
+            self.assertEqual(state.model, "preserved-model")
+            self.assertEqual(state.output_dir, "preserved-output")
+            self.assertEqual(state.timeout_seconds, 321)
+            self.assertIsNotNone(state.credential_error)
+            error = public_error(state.credential_error)["error"]
+            self.assertEqual(error["category"], "credential_decryption")
+            self.assertEqual(error["dpapi_error_code"], 13)
+            self.assertEqual(error["config_path"], str(config_path.resolve()))
+            self.assertNotIn("encrypted", json.dumps(error))
+
+    def test_interactive_configure_replaces_unreadable_credential(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            original = {
+                "base_url": "https://images.example.test/v1",
+                "model": "preserved-model",
+                "output_dir": "preserved-output",
+                "timeout_seconds": 321,
+                "api_key_protection": "windows-dpapi-current-user",
+                "api_key_protected": base64.b64encode(b"encrypted").decode(),
+            }
+            config_path.write_text(json.dumps(original), encoding="utf-8")
+            config_path.chmod(0o600)
+            args = SimpleNamespace(
+                config=config_path,
+                base_url=None,
+                model=None,
+                output_dir=None,
+                timeout=None,
+            )
+            failure = CredentialDecryptionError("unreadable")
+
+            with (
+                patch("image_client._unprotect_api_key", side_effect=failure),
+                patch.object(configure_cli.sys.stdin, "isatty", return_value=True),
+            ):
+                with self.assertRaises(ConfigError):
+                    configure_cli.configure(args, key_input_fn=lambda _prompt: "")
+            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), original)
+
+            with (
+                patch("image_client._unprotect_api_key", side_effect=failure),
+                patch.object(configure_cli.sys.stdin, "isatty", return_value=True),
+            ):
+                report = configure_cli.configure(
+                    args,
+                    key_input_fn=lambda _prompt: "replacement-secret",
+                )
+
+            configured = load_config(config_path, apply_env=False)
+            self.assertEqual(configured.api_key, "replacement-secret")
+            self.assertEqual(configured.base_url, "https://images.example.test/v1")
+            self.assertEqual(configured.model, "preserved-model")
+            self.assertEqual(configured.output_dir, "preserved-output")
+            self.assertEqual(configured.timeout_seconds, 321)
+            self.assertTrue(report["credential_replaced"])
+            self.assertNotIn("replacement-secret", json.dumps(report))
+
+    def test_interactive_configure_rejects_unknown_protection_scheme(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            original = {
+                "base_url": "https://images.example.test/v1",
+                "api_key_protection": "unknown-protection",
+                "api_key_protected": "opaque",
+            }
+            config_path.write_text(json.dumps(original), encoding="utf-8")
+            config_path.chmod(0o600)
+            args = SimpleNamespace(
+                config=config_path,
+                base_url=None,
+                model=None,
+                output_dir=None,
+                timeout=None,
+            )
+            prompts: list[str] = []
+
+            with patch.object(configure_cli.sys.stdin, "isatty", return_value=True):
+                with self.assertRaises(ConfigError):
+                    configure_cli.configure(
+                        args,
+                        key_input_fn=lambda prompt: prompts.append(prompt) or "replacement",
+                    )
+
+            self.assertEqual(prompts, [])
+            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), original)
+
+    def test_environment_key_bypasses_unreadable_stored_credential(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "https://images.example.test/v1",
+                        "api_key_protection": "windows-dpapi-current-user",
+                        "api_key_protected": "not-valid-base64",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+            with patch.dict(
+                os.environ,
+                {"SUB2API_IMAGE_API_KEY": "environment-secret"},
+                clear=True,
+            ):
+                config = load_config(config_path)
+            self.assertEqual(config.api_key, "environment-secret")
 
     @unittest.skipUnless(os.name == "posix", "POSIX permission check")
     def test_config_rejects_broad_permissions(self) -> None:

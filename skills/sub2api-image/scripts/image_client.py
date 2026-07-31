@@ -34,9 +34,17 @@ MAX_ERROR_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 128 * 1024 * 1024
 MAX_IMAGE_BYTES = 100 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-USER_AGENT = "sub2api-image-skill/1.2"
-WINDOWS_DPAPI_SCHEME = "windows-dpapi-current-user"
+USER_AGENT = "sub2api-image-skill/1.3"
+WINDOWS_DPAPI_CURRENT_USER_SCHEME = "windows-dpapi-current-user"
+WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME = "windows-dpapi-local-machine"
+WINDOWS_DPAPI_SCHEME = WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME
+WINDOWS_DPAPI_SCHEMES = {
+    WINDOWS_DPAPI_CURRENT_USER_SCHEME,
+    WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME,
+}
 WINDOWS_PICTURES_FOLDER_ID = "33e28130-4e1e-4676-835a-98395c3bc3bb"
+CRYPTPROTECT_UI_FORBIDDEN = 0x1
+CRYPTPROTECT_LOCAL_MACHINE = 0x4
 
 SIZE_ALIGNMENT = 16
 MIN_IMAGE_PIXELS = 655_360
@@ -121,6 +129,52 @@ class ConfigError(SkillError):
     category = "configuration"
 
 
+class CredentialDecryptionError(ConfigError):
+    category = "credential_decryption"
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        error_code: int | None = None,
+        config_path: Path | None = None,
+        protection: str | None = None,
+    ) -> None:
+        self.reason = reason
+        self.error_code = error_code
+        self.config_path = config_path
+        self.protection = protection
+        message = reason
+        if config_path is not None:
+            message = f"{message}: {config_path.resolve()}"
+        super().__init__(message)
+
+    def with_context(self, path: Path, protection: str) -> "CredentialDecryptionError":
+        return CredentialDecryptionError(
+            self.reason,
+            error_code=self.error_code,
+            config_path=path,
+            protection=protection,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "category": self.category,
+            "message": str(self),
+            "action": (
+                "Update or reconfigure the skill from the Windows user account. "
+                "A replacement API key is required only if the old credential cannot be migrated."
+            ),
+        }
+        if self.config_path is not None:
+            details["config_path"] = str(self.config_path.resolve())
+        if self.protection is not None:
+            details["credential_protection"] = self.protection
+        if self.error_code is not None:
+            details["dpapi_error_code"] = self.error_code
+        return {"ok": False, "error": details}
+
+
 class ImageValidationError(SkillError):
     category = "image_validation"
 
@@ -185,6 +239,28 @@ class Config:
         if path is not None:
             result["config_path"] = str(path.resolve())
         return result
+
+
+@dataclass(frozen=True)
+class ConfigState:
+    base_url: str
+    api_key: str | None
+    model: str
+    output_dir: str
+    timeout_seconds: int
+    credential_protection: str | None = None
+    credential_error: CredentialDecryptionError | None = None
+
+    def with_api_key(self, api_key: str) -> Config:
+        return config_from_mapping(
+            {
+                "base_url": self.base_url,
+                "api_key": api_key,
+                "model": self.model,
+                "output_dir": self.output_dir,
+                "timeout_seconds": self.timeout_seconds,
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -301,7 +377,12 @@ def config_protection() -> str:
     return "posix-mode-0600"
 
 
-def _windows_dpapi(data: bytes, *, protect: bool) -> bytes:
+def _windows_dpapi(
+    data: bytes,
+    *,
+    protect: bool,
+    machine_scope: bool = False,
+) -> bytes:
     if os.name != "nt":
         raise ConfigError("Windows DPAPI credentials can only be used on Windows")
 
@@ -334,13 +415,16 @@ def _windows_dpapi(data: bytes, *, protect: bool) -> bytes:
                 wintypes.DWORD,
                 ctypes.POINTER(DataBlob),
             ]
+            flags = CRYPTPROTECT_UI_FORBIDDEN
+            if machine_scope:
+                flags |= CRYPTPROTECT_LOCAL_MACHINE
             arguments = (
                 ctypes.byref(input_blob),
                 "VibeAI Sub2API Image API Key",
                 None,
                 None,
                 None,
-                0x1,
+                flags,
                 ctypes.byref(output_blob),
             )
         else:
@@ -360,7 +444,7 @@ def _windows_dpapi(data: bytes, *, protect: bool) -> bytes:
                 None,
                 None,
                 None,
-                0x1,
+                CRYPTPROTECT_UI_FORBIDDEN,
                 ctypes.byref(output_blob),
             )
 
@@ -368,9 +452,10 @@ def _windows_dpapi(data: bytes, *, protect: bool) -> bytes:
         if not operation(*arguments):
             error_code = ctypes.get_last_error()
             action = "protect" if protect else "unprotect"
-            raise ConfigError(
-                f"Windows DPAPI could not {action} the API key (error {error_code})"
-            )
+            message = f"Windows DPAPI could not {action} the API key (error {error_code})"
+            if protect:
+                raise ConfigError(message)
+            raise CredentialDecryptionError(message, error_code=error_code)
 
         kernel32.LocalFree.argtypes = [ctypes.c_void_p]
         kernel32.LocalFree.restype = ctypes.c_void_p
@@ -382,13 +467,20 @@ def _windows_dpapi(data: bytes, *, protect: bool) -> bytes:
     except ConfigError:
         raise
     except Exception as exc:
-        raise ConfigError(
-            f"Windows DPAPI is unavailable ({type(exc).__name__})"
-        ) from exc
+        message = f"Windows DPAPI is unavailable ({type(exc).__name__})"
+        if protect:
+            raise ConfigError(message) from exc
+        raise CredentialDecryptionError(message) from exc
 
 
-def _protect_api_key(value: str) -> str:
-    protected = _windows_dpapi(value.encode("utf-8"), protect=True)
+def _protect_api_key(value: str, protection: str = WINDOWS_DPAPI_SCHEME) -> str:
+    if protection not in WINDOWS_DPAPI_SCHEMES:
+        raise ConfigError("Configuration uses an unsupported API key protection scheme")
+    protected = _windows_dpapi(
+        value.encode("utf-8"),
+        protect=True,
+        machine_scope=protection == WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME,
+    )
     return base64.b64encode(protected).decode("ascii")
 
 
@@ -396,14 +488,18 @@ def _unprotect_api_key(value: str) -> str:
     try:
         protected = base64.b64decode(value, validate=True)
     except (ValueError, binascii.Error) as exc:
-        raise ConfigError("Windows DPAPI API key payload is invalid") from exc
+        raise CredentialDecryptionError(
+            "Windows DPAPI API key payload is invalid"
+        ) from exc
     if not protected:
-        raise ConfigError("Windows DPAPI API key payload is empty")
+        raise CredentialDecryptionError("Windows DPAPI API key payload is empty")
     raw = _windows_dpapi(protected, protect=False)
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ConfigError("Windows DPAPI API key is not valid UTF-8") from exc
+        raise CredentialDecryptionError(
+            "Windows DPAPI API key is not valid UTF-8"
+        ) from exc
 
 
 def _config_payload(config: Config) -> dict[str, Any]:
@@ -415,7 +511,10 @@ def _config_payload(config: Config) -> dict[str, Any]:
     }
     if os.name == "nt":
         payload["api_key_protection"] = WINDOWS_DPAPI_SCHEME
-        payload["api_key_protected"] = _protect_api_key(config.api_key)
+        protected = _protect_api_key(config.api_key)
+        if _unprotect_api_key(protected) != config.api_key:
+            raise ConfigError("Windows DPAPI API key verification failed")
+        payload["api_key_protected"] = protected
     else:
         payload["api_key"] = config.api_key
     return payload
@@ -441,53 +540,100 @@ def discover_config_path(
     return selected
 
 
+def _read_config_document(config_path: Path) -> dict[str, Any]:
+    try:
+        info = config_path.stat()
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            f"Configuration not found at {config_path}; run configure.py first"
+        ) from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise ConfigError(f"Configuration path is not a regular file: {config_path}")
+    if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077:
+        raise ConfigError(
+            f"Configuration permissions are too broad at {config_path}; run chmod 600"
+        )
+    try:
+        raw = config_path.read_bytes()
+    except OSError as exc:
+        raise ConfigError(f"Cannot read configuration at {config_path}: {exc}") from exc
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise ConfigError("Configuration file is unexpectedly large")
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"Configuration is not valid UTF-8 JSON: {config_path}") from exc
+    if not isinstance(parsed, Mapping):
+        raise ConfigError("Configuration must be a JSON object")
+    return dict(parsed)
+
+
+def read_config_state(
+    path: Path | str,
+    *,
+    decrypt_credential: bool = True,
+) -> ConfigState:
+    config_path = Path(path).expanduser()
+    data = _read_config_document(config_path)
+    public_config = config_from_mapping({**data, "api_key": "validation-placeholder"})
+    protection: str | None = None
+    credential_error: CredentialDecryptionError | None = None
+    api_key: str | None = None
+
+    if "api_key_protected" in data:
+        protection_value = data.get("api_key_protection")
+        if protection_value not in WINDOWS_DPAPI_SCHEMES:
+            raise ConfigError("Configuration uses an unsupported API key protection scheme")
+        protection = str(protection_value)
+        protected_value = data.get("api_key_protected")
+        if not isinstance(protected_value, str):
+            raise ConfigError("Windows DPAPI API key payload must be a string")
+        if decrypt_credential:
+            try:
+                api_key = validate_api_key(_unprotect_api_key(protected_value))
+            except CredentialDecryptionError as exc:
+                credential_error = exc.with_context(config_path, protection)
+    elif decrypt_credential:
+        api_key = validate_api_key(str(data.get("api_key", "")))
+
+    return ConfigState(
+        base_url=public_config.base_url,
+        api_key=api_key,
+        model=public_config.model,
+        output_dir=public_config.output_dir,
+        timeout_seconds=public_config.timeout_seconds,
+        credential_protection=protection,
+        credential_error=credential_error,
+    )
+
+
 def load_config(
     path: Path | str | None = None, *, apply_env: bool = True
 ) -> Config:
     config_path = discover_config_path(path)
-    data: Mapping[str, Any]
-    try:
-        info = config_path.stat()
-    except FileNotFoundError as exc:
-        overrides = _environment_overrides() if apply_env else {}
+    overrides = _environment_overrides() if apply_env else {}
+    if config_path.exists():
+        state = read_config_state(
+            config_path,
+            decrypt_credential="api_key" not in overrides,
+        )
+        if state.credential_error is not None:
+            raise state.credential_error
+        data: dict[str, Any] = {
+            "base_url": state.base_url,
+            "api_key": state.api_key or "",
+            "model": state.model,
+            "output_dir": state.output_dir,
+            "timeout_seconds": state.timeout_seconds,
+        }
+    else:
         if "api_key" not in overrides:
             raise ConfigError(
                 f"Configuration not found at {config_path}; run configure.py first"
-            ) from exc
-        data = {}
-    else:
-        if not stat.S_ISREG(info.st_mode):
-            raise ConfigError(f"Configuration path is not a regular file: {config_path}")
-        if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077:
-            raise ConfigError(
-                f"Configuration permissions are too broad at {config_path}; run chmod 600"
             )
-        try:
-            raw = config_path.read_bytes()
-        except OSError as exc:
-            raise ConfigError(f"Cannot read configuration at {config_path}: {exc}") from exc
-        if len(raw) > MAX_CONFIG_BYTES:
-            raise ConfigError("Configuration file is unexpectedly large")
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ConfigError(f"Configuration is not valid UTF-8 JSON: {config_path}") from exc
-        if not isinstance(parsed, Mapping):
-            raise ConfigError("Configuration must be a JSON object")
-        parsed_data = dict(parsed)
-        if "api_key_protected" in parsed_data:
-            if parsed_data.get("api_key_protection") != WINDOWS_DPAPI_SCHEME:
-                raise ConfigError("Configuration uses an unsupported API key protection scheme")
-            protected_value = parsed_data.get("api_key_protected")
-            if not isinstance(protected_value, str):
-                raise ConfigError("Windows DPAPI API key payload must be a string")
-            parsed_data["api_key"] = _unprotect_api_key(protected_value)
-        data = parsed_data
-
-    merged = dict(data)
-    if apply_env:
-        merged.update(_environment_overrides())
-    return config_from_mapping(merged)
+        data = {}
+    data.update(overrides)
+    return config_from_mapping(data)
 
 
 def save_config(config: Config, path: Path | str | None = None) -> Path:
