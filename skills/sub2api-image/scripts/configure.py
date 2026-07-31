@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 from image_client import (
     DEFAULT_BASE_URL,
@@ -75,7 +75,11 @@ def remove_config(path: Path | None) -> dict[str, object]:
     }
 
 
-def configure(args: argparse.Namespace) -> dict[str, object]:
+def configure(
+    args: argparse.Namespace,
+    *,
+    key_input_fn: Callable[[str], str] = input,
+) -> dict[str, object]:
     path = selected_config_path(args.config)
     existing_path = discover_config_path(args.config)
     existing: Config | None = None
@@ -83,14 +87,12 @@ def configure(args: argparse.Namespace) -> dict[str, object]:
         existing = load_config(existing_path, apply_env=False)
 
     if not sys.stdin.isatty():
-        raise ConfigError(
-            "Interactive terminal required so the API key can be read without echo"
-        )
+        raise ConfigError("Interactive terminal required to enter the API key")
 
-    label = "Sub2API user API key (input hidden)"
+    label = "Sub2API user API key (input visible)"
     if existing is not None:
         label += " [press Enter to keep the existing key]"
-    entered_key = getpass.getpass(f"{label}: ")
+    entered_key = key_input_fn(f"{label}: ")
     api_key = entered_key if entered_key else (existing.api_key if existing else "")
 
     mapping = {

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import re
@@ -292,7 +291,7 @@ def prompt_config(
     output_dir: str | None = None,
     timeout_seconds: int | None = None,
     input_fn: Callable[[str], str] = input,
-    secret_input_fn: Callable[[str], str] = getpass.getpass,
+    key_input_fn: Callable[[str], str] = input,
 ) -> Config:
     default_base_url = existing.base_url if existing else DEFAULT_BASE_URL
     if base_url is None:
@@ -301,10 +300,10 @@ def prompt_config(
     else:
         selected_base_url = base_url
 
-    key_label = "Sub2API 生图 API Key（输入隐藏）"
+    key_label = "Sub2API 生图 API Key（输入可见）"
     if existing is not None:
         key_label += " [直接回车保留现有密钥]"
-    entered_key = secret_input_fn(f"{key_label}: ")
+    entered_key = key_input_fn(f"{key_label}: ")
     selected_key = entered_key if entered_key else (existing.api_key if existing else "")
 
     return config_from_mapping(
@@ -327,7 +326,7 @@ def main() -> int:
         validate_skill_source(SKILL_SOURCE)
         if not sys.stdin.isatty():
             raise InstallError(
-                "Run this installer in an interactive terminal so the API key stays hidden"
+                "Run this installer in an interactive terminal to enter the API key"
             )
 
         platform_name = detect_platform()
@@ -391,7 +390,7 @@ def main() -> int:
         print(f"[OK] Base URL: {config.base_url}")
         print(f"[OK] 模型：{config.model}")
         print(f"[OK] 保护方式：{config_protection()}")
-        print("[OK] API Key 已安全保存，未在终端中显示")
+        print("[OK] API Key 已受保护保存（输入时在终端中可见）")
         if result.backup_path is not None:
             print(f"[WARN] 旧安装备份未能清理，保留于：{result.backup_path}")
 

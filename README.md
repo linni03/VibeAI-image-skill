@@ -48,15 +48,15 @@ sh install.sh
 
 ```text
 Sub2API Base URL [https://vibeai.tech/v1]:
-Sub2API 生图 API Key（输入隐藏）:
+Sub2API 生图 API Key（输入可见）:
 ```
 
 - 使用默认 Base URL：直接按回车
 - 使用其他 Sub2API 地址：输入地址后按回车
-- 输入 API Key 时终端不会显示字符，这是正常现象
+- API Key 输入内容会在终端中显示，便于确认输入或粘贴是否成功；请确保周围无人查看终端
 - 已经配置过时，可以直接按回车保留现有 Key
 
-Skill 会安装到 `$CODEX_HOME/skills/sub2api-image`；未设置 `CODEX_HOME` 时使用 `~/.codex/skills/sub2api-image`。Windows 配置保存在 `$CODEX_HOME/sub2api-image/config.json`，macOS、Linux 和 WSL2 配置保存在 `~/.config/sub2api-image/config.json`。
+Skill 会安装到 `$CODEX_HOME/skills/sub2api-image`；未设置 `CODEX_HOME` 时使用 `~/.codex/skills/sub2api-image`。Windows 配置保存在 `$CODEX_HOME/sub2api-image/config.json`，macOS、Linux 和 WSL2 配置保存在 `~/.config/sub2api-image/config.json`。输入虽然可见，但保存后仍受 Windows DPAPI 加密或 `0600` 文件权限保护。
 
 安装和配置不会生成图片、访问图像 API 或产生生图费用。安装器会暂存新版本，并在配置失败时恢复原来的 Skill，避免留下半安装状态。
 

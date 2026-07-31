@@ -41,13 +41,20 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((target / "scripts" / "generate.py").is_file())
 
     def test_prompt_config_uses_defaults_and_saves_private_file(self) -> None:
+        key_prompts: list[str] = []
+
+        def enter_visible_key(prompt: str) -> str:
+            key_prompts.append(prompt)
+            return "sk-image-test"
+
         config = installer.prompt_config(
             None,
             input_fn=lambda _prompt: "",
-            secret_input_fn=lambda _prompt: "sk-image-test",
+            key_input_fn=enter_visible_key,
         )
         self.assertEqual(config.base_url, installer.DEFAULT_BASE_URL)
         self.assertEqual(config.model, installer.DEFAULT_MODEL)
+        self.assertIn("输入可见", key_prompts[0])
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config" / "config.json"
@@ -73,7 +80,7 @@ class InstallerTests(unittest.TestCase):
         config = installer.prompt_config(
             existing,
             input_fn=lambda _prompt: "",
-            secret_input_fn=lambda _prompt: "",
+            key_input_fn=lambda _prompt: "",
         )
         self.assertEqual(config, existing)
 

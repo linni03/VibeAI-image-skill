@@ -248,17 +248,25 @@ class ConfigTests(unittest.TestCase):
                 output_dir=None,
                 timeout=None,
             )
+            key_prompts: list[str] = []
+
+            def preserve_visible_key(prompt: str) -> str:
+                key_prompts.append(prompt)
+                return ""
 
             with (
                 patch("image_client.DEFAULT_CONFIG_PATH", target),
                 patch("image_client.LEGACY_CONFIG_PATH", legacy),
                 patch.object(configure_cli.sys.stdin, "isatty", return_value=True),
-                patch.object(configure_cli.getpass, "getpass", return_value=""),
             ):
-                report = configure_cli.configure(args)
+                report = configure_cli.configure(
+                    args,
+                    key_input_fn=preserve_visible_key,
+                )
 
             self.assertEqual(report["migrated_from"], str(legacy.resolve()))
             self.assertTrue(report["legacy_config_retained"])
+            self.assertIn("input visible", key_prompts[0])
             self.assertEqual(load_config(target), config)
             self.assertTrue(legacy.is_file())
 

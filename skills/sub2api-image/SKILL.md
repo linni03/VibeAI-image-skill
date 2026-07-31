@@ -28,7 +28,7 @@ Execute each client invocation as one logical command with separate arguments. D
 
 ## Configure
 
-Prefer an interactive terminal so the key is read without echo and never appears in process arguments:
+Use an interactive terminal so the key never appears in process arguments. Key input is intentionally visible, allowing the user to verify that typing or pasting succeeded; ensure nobody else can view the terminal:
 
 ```text
 <python> <skill-dir>/scripts/configure.py
