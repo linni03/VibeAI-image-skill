@@ -41,6 +41,8 @@ class InstallerTests(unittest.TestCase):
             self.assertIsNone(second.backup_path)
             self.assertFalse(stale.exists())
             self.assertTrue((target / "scripts" / "generate.py").is_file())
+            self.assertTrue((target / "scripts" / "image_stream.py").is_file())
+            self.assertTrue((target / "scripts" / "doctor.py").is_file())
 
     def test_prompt_config_uses_defaults_and_saves_private_file(self) -> None:
         key_prompts: list[str] = []
@@ -129,7 +131,14 @@ class InstallerTests(unittest.TestCase):
                 "policy:\n  allow_implicit_invocation: false\n",
                 encoding="utf-8",
             )
-            for name in ("configure.py", "generate.py", "edit.py", "image_client.py"):
+            for name in (
+                "configure.py",
+                "generate.py",
+                "edit.py",
+                "image_client.py",
+                "image_stream.py",
+                "doctor.py",
+            ):
                 (source / "scripts" / name).write_text("", encoding="utf-8")
 
             with self.assertRaises(installer.InstallError):

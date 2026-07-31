@@ -16,8 +16,11 @@ from image_client import (
     DEFAULT_CONFIG_PATH,
     Config,
     ConfigError,
+    GenerationResult,
     ImageClient,
     ImageValidationError,
+    SkillError,
+    StreamInterruptedError,
     load_config,
     pictures_output,
     preflight_output_path,
@@ -232,6 +235,43 @@ def write_metadata_report(
     report["metadata_path"] = str(written)
 
 
+def partial_output_path(path: Path | str) -> Path:
+    selected = Path(path).expanduser()
+    if selected.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+        return selected.with_name(f"{selected.stem}-partial{selected.suffix}")
+    return selected.with_name(f"{selected.name}-partial")
+
+
+def save_interrupted_partials(
+    client: ImageClient,
+    exc: StreamInterruptedError,
+    *,
+    output_dir: Path | str | None,
+    output_path: Path | str | None,
+    configured_output_dir: Path | str,
+    overwrite: bool,
+) -> None:
+    items = exc.partial_response.get("data")
+    if not isinstance(items, list) or not items:
+        return
+    try:
+        files = save_response_images(
+            client,
+            exc.partial_response,
+            None if output_path is not None else output_dir or configured_output_dir,
+            operation="generate-partial",
+            output_path=partial_output_path(output_path) if output_path is not None else None,
+            overwrite=overwrite,
+        )
+    except SkillError as save_error:
+        exc.with_partial_save_error(str(save_error))
+        return
+    for item in files:
+        item["diagnostic"] = "partial_image"
+        item["final"] = False
+    exc.with_partial_files(files)
+
+
 def generate_images(
     config: Config,
     *,
@@ -250,6 +290,7 @@ def generate_images(
     moderation: str | None = None,
     output_compression: int | None = None,
     timeout_seconds: int | None = None,
+    stream: bool = True,
     dry_run: bool = False,
     metadata: Path | str | None = None,
 ) -> dict[str, Any]:
@@ -298,6 +339,9 @@ def generate_images(
         payload["moderation"] = normalized_moderation
     if normalized_compression is not None:
         payload["output_compression"] = normalized_compression
+    if stream:
+        payload["stream"] = True
+        payload["partial_images"] = 1
 
     base_report: dict[str, Any] = {
         "ok": True,
@@ -309,6 +353,7 @@ def generate_images(
         "requested_count": selected_count,
         "output_format": normalized_format,
         "timeout_seconds": selected_config.timeout_seconds,
+        "stream_requested": stream,
     }
     if dry_run:
         base_report.update(
@@ -324,7 +369,28 @@ def generate_images(
 
     started = time.monotonic()
     client = ImageClient(selected_config)
-    response, headers = client.generate(payload)
+    try:
+        if stream:
+            generation = client.generate_stream(payload)
+        else:
+            response, headers = client.generate(payload)
+            generation = GenerationResult(
+                response=response,
+                headers=headers,
+                response_mode="json",
+            )
+    except StreamInterruptedError as exc:
+        save_interrupted_partials(
+            client,
+            exc,
+            output_dir=output_dir,
+            output_path=output_path,
+            configured_output_dir=config.output_dir,
+            overwrite=overwrite,
+        )
+        raise
+    response = generation.response
+    headers = generation.headers
     images = save_response_images(
         client,
         response,
@@ -347,8 +413,16 @@ def generate_images(
         "ok": ok,
         **matches,
         "elapsed_seconds": elapsed,
+        "response_mode": generation.response_mode,
         "images": images,
     }
+    if generation.response_mode == "sse":
+        report["stream"] = {
+            "completion_marker_received": generation.stream_done,
+            "event_count": generation.stream_event_count,
+        }
+    if generation.transport_warning:
+        report["transport_warning"] = dict(generation.transport_warning)
     identifier = request_id(headers)
     if identifier:
         report["request_id"] = identifier
@@ -403,6 +477,20 @@ def parse_args() -> argparse.Namespace:
         help="Write safe JSON metadata; omit PATH for an automatic sidecar",
     )
     parser.add_argument("--timeout", type=int, help="Per-request timeout in seconds")
+    streaming = parser.add_mutually_exclusive_group()
+    streaming.add_argument(
+        "--stream",
+        dest="stream",
+        action="store_true",
+        default=True,
+        help="Request SSE progress events (default)",
+    )
+    streaming.add_argument(
+        "--no-stream",
+        dest="stream",
+        action="store_false",
+        help="Request a single JSON response",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate without network or file writes")
     parser.add_argument(
         "--config",
@@ -439,6 +527,7 @@ def main() -> int:
             moderation=args.moderation,
             output_compression=args.output_compression,
             timeout_seconds=args.timeout,
+            stream=args.stream,
             dry_run=args.dry_run,
             metadata=args.metadata,
         )

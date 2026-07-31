@@ -13,7 +13,7 @@ Authenticate with a Sub2API image-enabled user key. The client does not implemen
 
 ## Requests
 
-Generation sends `model`, `prompt`, `size`, `n`, `response_format=b64_json`, and `output_format`. Editing sends equivalent scalar multipart fields and repeats the `image` part for each local reference image. It sends at most one `mask` part.
+Generation sends `model`, `prompt`, `size`, `n`, `response_format=b64_json`, and `output_format`. By default it also sends `stream=true` and `partial_images=1`; `--no-stream` omits both fields. Editing sends equivalent scalar multipart fields and repeats the `image` part for each local reference image. It sends at most one `mask` part.
 
 Optional supported fields include `quality`, `background`, `moderation`, `output_compression`, and edit `input_fidelity`. Transparent backgrounds require PNG or WebP. Output compression is an integer from 0 through 100 and applies only to JPEG or WebP.
 
@@ -21,7 +21,11 @@ Use `Cache-Control: no-store` and `Pragma: no-cache`. `b64_json` avoids an objec
 
 ## Responses
 
-Require a non-empty `data[]`. Each item must contain valid `b64_json`, a data URL, or an HTTP(S) URL that decodes to PNG, JPEG, or WebP. Inspect file magic and actual dimensions before atomic save.
+For JSON, require a non-empty `data[]`. Each item must contain valid `b64_json`, a data URL, or an HTTP(S) URL that decodes to PNG, JPEG, or WebP. Inspect file magic and actual dimensions before atomic save.
+
+For `text/event-stream`, parse incrementally across arbitrary byte boundaries. Support CRLF, comments/keepalives, multiline `data:`, `image_generation.partial_image`, `image_generation.completed`, explicit error events, and `[DONE]`. Reject malformed JSON and oversized events. If the response is JSON despite a streaming request, parse that same response without sending a second request.
+
+An EOF after a validated completed event leaves the final image usable but adds a transport warning. An EOF before completion is a failed, billing-ambiguous outcome: save validated partial images under clearly partial names, never report them as final, and never retry automatically.
 
 Reports preserve only safe scalar response metadata and usage scalars. Metadata sidecars may contain request options and local paths, but must exclude API keys, image base64, response URLs, and signed URL query parameters.
 
@@ -41,7 +45,7 @@ Treat size, tier, orientation, image count, or output format mismatch as a faile
 
 `credential_decryption` is a local pre-request failure, not an API status. Report its configuration path, DPAPI error code when available, and stored protection scheme. Update or reconfigure the skill; preserve validated non-secret settings, and require a replacement key only when the old credential cannot be migrated.
 
-Timeouts are ambiguous paid outcomes: the upstream might finish after the client disconnects. Never retry automatically.
+Timeouts, TLS EOF, incomplete HTTP bodies, remote disconnects and connection resets are ambiguous paid outcomes: the upstream might finish after the client disconnects. Never retry automatically.
 
 ## Billing Verification
 

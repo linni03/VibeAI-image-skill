@@ -162,6 +162,8 @@ def validate_skill_source(source: Path) -> None:
         "scripts/generate.py",
         "scripts/edit.py",
         "scripts/image_client.py",
+        "scripts/image_stream.py",
+        "scripts/doctor.py",
     )
     missing = [name for name in required if not (source / name).is_file()]
     if missing:

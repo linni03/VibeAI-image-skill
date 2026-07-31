@@ -6,11 +6,13 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import http.client
 import json
 import mimetypes
 import os
 import re
 import socket
+import ssl
 import stat
 import struct
 import tempfile
@@ -23,6 +25,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote_to_bytes, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+from image_stream import ImageStreamState, SSEEventError, SSEImageParser, SSEParseError
+
 
 DEFAULT_BASE_URL = "https://vibeai.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
@@ -34,7 +38,7 @@ MAX_ERROR_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 128 * 1024 * 1024
 MAX_IMAGE_BYTES = 100 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-USER_AGENT = "sub2api-image-skill/1.3"
+USER_AGENT = "sub2api-image-skill/1.4"
 WINDOWS_DPAPI_CURRENT_USER_SCHEME = "windows-dpapi-current-user"
 WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME = "windows-dpapi-local-machine"
 WINDOWS_DPAPI_SCHEME = WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME
@@ -190,16 +194,22 @@ class APIError(SkillError):
         error_type: str | None = None,
         retry_after: str | None = None,
         request_id: str | None = None,
+        category_override: str | None = None,
+        billing_ambiguous: bool = False,
+        transport_kind: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.error_type = error_type
         self.retry_after = retry_after
         self.request_id = request_id
+        self.category_override = category_override
+        self.billing_ambiguous = billing_ambiguous
+        self.transport_kind = transport_kind
 
     def as_dict(self) -> dict[str, Any]:
         details: dict[str, Any] = {
-            "category": classify_http_error(self.status),
+            "category": self.category_override or classify_http_error(self.status),
             "message": str(self),
         }
         if self.status is not None:
@@ -210,13 +220,74 @@ class APIError(SkillError):
             details["retry_after"] = self.retry_after
         if self.request_id:
             details["request_id"] = self.request_id
+        if self.transport_kind:
+            details["transport"] = self.transport_kind
         if self.status == 524:
             details["retry_safe"] = False
             details["action"] = (
                 "The paid request outcome is ambiguous. Check the image-only direct base URL, "
                 "Cloudflare/origin timeouts, and usage logs before approving a retry."
             )
+        elif self.billing_ambiguous:
+            details["billing_status"] = "ambiguous"
+            details["retry_safe"] = False
+            details["action"] = (
+                "The request may have reached the image service. Check Sub2API connectivity, "
+                "the request ID and usage logs before approving another generation request."
+            )
         return {"ok": False, "error": details}
+
+
+class StreamInterruptedError(APIError):
+    """A generation stream ended without a trustworthy completion boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        headers: Mapping[str, str],
+        partial_response: Mapping[str, Any] | None = None,
+        category: str = "stream_interrupted",
+        error_type: str | None = None,
+        transport_kind: str | None = None,
+    ) -> None:
+        self.headers = dict(headers)
+        self.partial_response = dict(partial_response or {"data": []})
+        self.partial_files: list[dict[str, Any]] = []
+        self.partial_save_error: str | None = None
+        super().__init__(
+            message,
+            error_type=error_type,
+            request_id=_request_id(self.headers),
+            category_override=category,
+            billing_ambiguous=True,
+            transport_kind=transport_kind,
+        )
+
+    def with_partial_files(
+        self, files: Sequence[Mapping[str, Any]]
+    ) -> "StreamInterruptedError":
+        self.partial_files = [dict(item) for item in files]
+        return self
+
+    def with_partial_save_error(self, message: str) -> "StreamInterruptedError":
+        self.partial_save_error = message
+        return self
+
+    def as_dict(self) -> dict[str, Any]:
+        result = super().as_dict()
+        details = result["error"]
+        details["stream_incomplete"] = True
+        details["final_images_saved"] = 0
+        details["partial_image_count"] = len(
+            self.partial_response.get("data", [])
+        )
+        if self.partial_files:
+            details["partial_images"] = [dict(item) for item in self.partial_files]
+            details["partial_images_are_final"] = False
+        if self.partial_save_error:
+            details["partial_save_error"] = self.partial_save_error
+        return result
 
 
 @dataclass(frozen=True)
@@ -274,6 +345,16 @@ class ImageInfo:
     @property
     def tier(self) -> str:
         return classify_dimensions(self.width, self.height)
+
+
+@dataclass(frozen=True)
+class GenerationResult:
+    response: dict[str, Any]
+    headers: dict[str, str]
+    response_mode: str
+    stream_done: bool | None = None
+    stream_event_count: int = 0
+    transport_warning: dict[str, Any] | None = None
 
 
 def redact_key(value: str) -> str:
@@ -655,7 +736,7 @@ def save_config(config: Config, path: Path | str | None = None) -> Path:
     temporary_path: Path | None = None
     try:
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{config_path.name}.", dir=parent
+            prefix=f".{config_path.name}.", suffix=".tmp", dir=parent
         )
         temporary_path = Path(temporary_name)
         if os.name == "posix":
@@ -872,6 +953,52 @@ def _read_limited(response: Any, limit: int) -> bytes:
     return data
 
 
+def _transport_details(exc: BaseException) -> tuple[str, BaseException]:
+    reason: BaseException = exc
+    while isinstance(reason, URLError) and isinstance(reason.reason, BaseException):
+        reason = reason.reason
+
+    if isinstance(reason, ssl.SSLError):
+        message = str(reason).upper()
+        category = (
+            "tls_unexpected_eof"
+            if isinstance(reason, ssl.SSLEOFError) or "UNEXPECTED_EOF" in message
+            else "tls_error"
+        )
+    elif isinstance(reason, http.client.IncompleteRead):
+        category = "incomplete_response"
+    elif isinstance(reason, http.client.RemoteDisconnected):
+        category = "remote_disconnected"
+    elif isinstance(reason, (ConnectionResetError, BrokenPipeError)):
+        category = "connection_reset"
+    elif isinstance(reason, ConnectionAbortedError):
+        category = "connection_aborted"
+    elif isinstance(reason, (socket.timeout, TimeoutError)):
+        category = "network_timeout"
+    elif isinstance(reason, EOFError):
+        category = "incomplete_response"
+    else:
+        category = "network_error"
+    return category, reason
+
+
+def _transport_api_error(
+    exc: BaseException,
+    *,
+    api_key: str,
+    headers: Mapping[str, str] | None = None,
+    billing_ambiguous: bool = True,
+) -> APIError:
+    category, reason = _transport_details(exc)
+    return APIError(
+        redact_text(f"Sub2API request failed: {reason}", (api_key,)),
+        request_id=_request_id(headers or {}),
+        category_override=category,
+        billing_ambiguous=billing_ambiguous,
+        transport_kind=category,
+    )
+
+
 def _request_id(headers: Mapping[str, str]) -> str | None:
     for name in ("x-request-id", "openai-request-id", "cf-ray"):
         value = headers.get(name)
@@ -900,6 +1027,21 @@ def _error_details(raw: bytes) -> tuple[str, str | None]:
     return message or "Sub2API returned an empty error response", error_type
 
 
+def _parse_json_response(
+    raw: bytes, headers: Mapping[str, str]
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise APIError(
+            "Sub2API returned a successful response that was not valid JSON",
+            request_id=_request_id(headers),
+        ) from exc
+    if not isinstance(payload, dict):
+        raise APIError("Sub2API JSON response must be an object")
+    return payload
+
+
 class ImageClient:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -925,10 +1067,11 @@ class ImageClient:
                 "User-Agent": USER_AGENT,
             },
         )
+        headers: dict[str, str] = {}
         try:
             with urlopen(request, timeout=self.config.timeout_seconds) as response:
-                raw = _read_limited(response, MAX_RESPONSE_BYTES)
                 headers = {key.lower(): value for key, value in response.headers.items()}
+                raw = _read_limited(response, MAX_RESPONSE_BYTES)
         except HTTPError as exc:
             raw = _read_limited(exc, MAX_ERROR_BYTES)
             headers = {key.lower(): value for key, value in exc.headers.items()}
@@ -940,28 +1083,217 @@ class ImageClient:
                 retry_after=headers.get("retry-after"),
                 request_id=_request_id(headers),
             ) from None
-        except (URLError, socket.timeout, TimeoutError, OSError) as exc:
-            reason = getattr(exc, "reason", exc)
-            raise APIError(
-                redact_text(f"Sub2API request failed: {reason}", (self.config.api_key,))
+        except (
+            http.client.IncompleteRead,
+            URLError,
+            socket.timeout,
+            TimeoutError,
+            OSError,
+        ) as exc:
+            raise _transport_api_error(
+                exc,
+                api_key=self.config.api_key,
+                headers=headers,
             ) from None
 
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise APIError(
-                "Sub2API returned a successful response that was not valid JSON",
-                request_id=_request_id(headers),
-            ) from exc
-        if not isinstance(payload, dict):
-            raise APIError("Sub2API JSON response must be an object")
-        return payload, headers
+        return _parse_json_response(raw, headers), headers
 
     def generate(self, payload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
         return self._request("POST", "/images/generations", body, "application/json")
+
+    def generate_stream(self, payload: Mapping[str, Any]) -> GenerationResult:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        request = Request(
+            f"{self.config.base_url}/images/generations",
+            data=body,
+            method="POST",
+            headers={
+                "Accept": "text/event-stream",
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Cache-Control": "no-store",
+                "Content-Type": "application/json",
+                "Pragma": "no-cache",
+                "User-Agent": USER_AGENT,
+            },
+        )
+        headers: dict[str, str] = {}
+        try:
+            with urlopen(request, timeout=self.config.timeout_seconds) as response:
+                headers = {key.lower(): value for key, value in response.headers.items()}
+                content_type = headers.get("content-type", "").lower()
+                if "text/event-stream" not in content_type:
+                    raw = _read_limited(response, MAX_RESPONSE_BYTES)
+                    return GenerationResult(
+                        response=_parse_json_response(raw, headers),
+                        headers=headers,
+                        response_mode="json",
+                    )
+                return self._read_generation_stream(response, headers)
+        except HTTPError as exc:
+            raw = _read_limited(exc, MAX_ERROR_BYTES)
+            headers = {key.lower(): value for key, value in exc.headers.items()}
+            message, error_type = _error_details(raw)
+            raise APIError(
+                redact_text(message, (self.config.api_key,)),
+                status=exc.code,
+                error_type=error_type,
+                retry_after=headers.get("retry-after"),
+                request_id=_request_id(headers),
+            ) from None
+        except StreamInterruptedError:
+            raise
+        except (
+            http.client.IncompleteRead,
+            URLError,
+            socket.timeout,
+            TimeoutError,
+            OSError,
+        ) as exc:
+            raise _transport_api_error(
+                exc,
+                api_key=self.config.api_key,
+                headers=headers,
+            ) from None
+
+    def _read_generation_stream(
+        self,
+        response: Any,
+        headers: Mapping[str, str],
+    ) -> GenerationResult:
+        parser = SSEImageParser()
+        failure: BaseException | None = None
+        try:
+            while True:
+                chunk = response.read(64 * 1024)
+                if not chunk:
+                    break
+                parser.feed(chunk)
+            state = parser.finish()
+        except http.client.IncompleteRead as exc:
+            failure = exc
+            try:
+                if exc.partial:
+                    parser.feed(bytes(exc.partial))
+                state = parser.finish()
+            except SSEParseError as parse_error:
+                failure = parse_error
+                state = parser.state
+        except SSEParseError as exc:
+            failure = exc
+            state = parser.state
+        except (URLError, socket.timeout, TimeoutError, OSError) as exc:
+            failure = exc
+            try:
+                state = parser.finish()
+            except SSEParseError as parse_error:
+                failure = parse_error
+                state = parser.state
+
+        validated_partial, partial_error = self._validated_stream_items(
+            state.partial_data
+        )
+        validated_completed, completed_error = self._validated_stream_items(state.data)
+        state.partial_data = validated_partial
+        state.data = validated_completed
+        validation_error = completed_error or partial_error
+        if validation_error is not None:
+            failure = validation_error
+
+        if failure is None and not state.done:
+            failure = EOFError("SSE stream ended before the [DONE] marker")
+        if failure is None and not state.data:
+            failure = SSEParseError("SSE stream completed without a final image")
+
+        transport_failure = isinstance(
+            failure,
+            (
+                EOFError,
+                http.client.IncompleteRead,
+                URLError,
+                socket.timeout,
+                TimeoutError,
+                OSError,
+            ),
+        )
+        if failure is not None and state.data and transport_failure:
+            category, reason = _transport_details(failure)
+            return GenerationResult(
+                response=state.response(),
+                headers=dict(headers),
+                response_mode="sse",
+                stream_done=state.done,
+                stream_event_count=state.event_count,
+                transport_warning={
+                    "category": category,
+                    "message": redact_text(
+                        f"The stream ended after a completed image was received: {reason}",
+                        (self.config.api_key,),
+                    ),
+                    "retry_safe": False,
+                    "final_image_received": True,
+                },
+            )
+        if failure is not None:
+            raise self._stream_interruption(failure, headers, state) from None
+
+        return GenerationResult(
+            response=state.response(),
+            headers=dict(headers),
+            response_mode="sse",
+            stream_done=True,
+            stream_event_count=state.event_count,
+        )
+
+    def _validated_stream_items(
+        self, items: Sequence[Mapping[str, Any]]
+    ) -> tuple[list[dict[str, Any]], Exception | None]:
+        valid: list[dict[str, Any]] = []
+        for item in items:
+            try:
+                inspect_image(self.result_bytes(item))
+            except (APIError, ImageValidationError) as exc:
+                return valid, exc
+            valid.append(dict(item))
+        return valid, None
+
+    def _stream_interruption(
+        self,
+        failure: BaseException,
+        headers: Mapping[str, str],
+        state: ImageStreamState,
+    ) -> StreamInterruptedError:
+        error_type: str | None = None
+        transport_kind: str | None = None
+        if isinstance(failure, SSEParseError):
+            category = failure.category
+            error_type = failure.error_type
+            reason: BaseException = failure
+        elif isinstance(failure, ImageValidationError):
+            category = "stream_image_validation"
+            reason = failure
+        elif isinstance(failure, EOFError):
+            category = "incomplete_response"
+            transport_kind = category
+            reason = failure
+        else:
+            category, reason = _transport_details(failure)
+            transport_kind = category
+        return StreamInterruptedError(
+            redact_text(
+                f"Sub2API image stream was interrupted: {reason}",
+                (self.config.api_key,),
+            ),
+            headers=headers,
+            partial_response=state.partial_response(),
+            category=category,
+            error_type=error_type,
+            transport_kind=transport_kind,
+        )
 
     def edit(
         self,
@@ -970,6 +1302,66 @@ class ImageClient:
     ) -> tuple[dict[str, Any], dict[str, str]]:
         body, content_type = encode_multipart(fields, files)
         return self._request("POST", "/images/edits", body, content_type)
+
+    def probe_models(self) -> dict[str, Any]:
+        """Check TLS, connectivity and authentication without creating an image."""
+        endpoint = f"{self.config.base_url}/models"
+        request = Request(
+            endpoint,
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "User-Agent": USER_AGENT,
+            },
+        )
+        headers: dict[str, str] = {}
+        started = time.monotonic()
+        try:
+            with urlopen(request, timeout=self.config.timeout_seconds) as response:
+                headers = {key.lower(): value for key, value in response.headers.items()}
+                raw = _read_limited(response, MAX_ERROR_BYTES)
+                status = getattr(response, "status", response.getcode())
+        except HTTPError as exc:
+            raw = _read_limited(exc, MAX_ERROR_BYTES)
+            headers = {key.lower(): value for key, value in exc.headers.items()}
+            message, error_type = _error_details(raw)
+            raise APIError(
+                redact_text(message, (self.config.api_key,)),
+                status=exc.code,
+                error_type=error_type,
+                retry_after=headers.get("retry-after"),
+                request_id=_request_id(headers),
+            ) from None
+        except (
+            http.client.IncompleteRead,
+            URLError,
+            socket.timeout,
+            TimeoutError,
+            OSError,
+        ) as exc:
+            raise _transport_api_error(
+                exc,
+                api_key=self.config.api_key,
+                headers=headers,
+                billing_ambiguous=False,
+            ) from None
+        result: dict[str, Any] = {
+            "ok": 200 <= int(status) < 300,
+            "endpoint": endpoint,
+            "status": int(status),
+            "content_type": headers.get("content-type"),
+            "response_bytes": len(raw),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "image_request_sent": False,
+            "billing_expected": False,
+        }
+        identifier = _request_id(headers)
+        if identifier:
+            result["request_id"] = identifier
+        return result
 
     def result_bytes(self, item: Mapping[str, Any]) -> bytes:
         encoded = item.get("b64_json")
@@ -1165,7 +1557,9 @@ def _webp_dimensions(data: bytes) -> tuple[int, int]:
 def _atomic_write(path: Path, data: bytes) -> None:
     temporary_path: Path | None = None
     try:
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
         temporary_path = Path(temporary_name)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)

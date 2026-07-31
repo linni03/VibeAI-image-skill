@@ -19,11 +19,14 @@ __pycache__/
 .pytest_cache/
 .coverage
 .coverage.*
+coverage.xml
+*.cover
 htmlcov/
 .tox/
 .nox/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
 
 # Virtual environments and build output
 .venv/
@@ -41,6 +44,8 @@ test-output/
 *.temp
 *.swp
 *.swo
+*.bak
+*.orig
 *~
 
 # Editor settings
@@ -52,3 +57,6 @@ test-output/
 ._*
 Thumbs.db
 Desktop.ini
+ehthumbs.db
+*.stackdump
+$RECYCLE.BIN/
