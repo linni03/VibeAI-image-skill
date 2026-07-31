@@ -2,7 +2,7 @@
 
 ## Known Behavior
 
-The current Sub2API checkout defaults to `gpt-image-2`, recognizes `gpt-image-*` models, and passes explicit sizes to the selected image channel. `/v1/models` can show that a model is routed, but it does not prove every channel supports every image option.
+Sub2API 0.1.169 routes OpenAI OAuth image accounts through its Responses image-generation bridge. This skill defaults to the `sub2api-openai-oauth` profile and `gpt-image-2`. `/v1/models` can show that a model is routed, but it does not prove every account or bridge supports every image option.
 
 Keep these facts separate:
 
@@ -23,15 +23,15 @@ Pass `auto` or a `WIDTHxHEIGHT` satisfying every constraint:
 
 Reject invalid sizes before sending a paid request and report the nearest legal suggestion. Never round or substitute silently.
 
-## Presets
+## Verified OAuth Presets
 
 | Tier | Square | Landscape | Portrait |
 | --- | --- | --- | --- |
-| `1K` | `1024x1024` | `1024x640` | `640x1024` |
-| `2K` | `2048x2048` | `2048x1152` | `1152x2048` |
-| `4K` | `2880x2880` | `3840x2160` | `2160x3840` |
+| `1K` | `1024x1024` | unsupported preset | unsupported preset |
+| `2K` | unsupported preset | `1536x1024` | `1024x1536` |
+| `4K` | unsupported preset | unsupported preset | unsupported preset |
 
-These are legal request presets, not proof of channel support. Report an upstream rejection and let the operator choose another legal size.
+Unsupported presets fail locally before network activity. They are not silently rounded, downgraded, or replaced. `--size WIDTHxHEIGHT` remains available for an exact size that the operator has separately validated; it must satisfy the client constraints above, and the returned bytes must match exactly.
 
 ## Billing Classification
 
@@ -41,7 +41,7 @@ Sub2API classifies explicit or actual dimensions by longest edge:
 - `<= 2048`: `2K`
 - `> 2048`: `4K`
 
-For example, `1536x1024` is `2K`. When returned images span tiers, Sub2API uses the highest output tier and records a size breakdown.
+For example, OAuth-native `1536x1024` is `2K`. When returned images span tiers, Sub2API uses the highest output tier and records a size breakdown.
 
 ## Matching Rules
 

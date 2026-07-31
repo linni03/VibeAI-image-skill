@@ -16,6 +16,7 @@ from image_client import (
     DEFAULT_CONFIG_PATH,
     Config,
     ConfigError,
+    default_stream_for_profile,
     GenerationResult,
     ImageClient,
     ImageValidationError,
@@ -290,7 +291,7 @@ def generate_images(
     moderation: str | None = None,
     output_compression: int | None = None,
     timeout_seconds: int | None = None,
-    stream: bool = True,
+    stream: bool | None = None,
     dry_run: bool = False,
     metadata: Path | str | None = None,
 ) -> dict[str, Any]:
@@ -306,7 +307,16 @@ def generate_images(
     )
     selected_model = validate_model(model or config.model)
     selected_prompt = validate_prompt(prompt)
-    requested_size, requested_tier = resolve_size(tier, orientation, exact_size)
+    requested_size, requested_tier = resolve_size(
+        tier,
+        orientation,
+        exact_size,
+        provider_profile=config.provider_profile,
+    )
+    size_source = "exact" if exact_size is not None else "profile_preset"
+    selected_stream = (
+        default_stream_for_profile(config.provider_profile) if stream is None else stream
+    )
     _, requested_orientation = requested_shape(requested_size)
     selected_config = request_config(config, timeout_seconds)
 
@@ -339,7 +349,7 @@ def generate_images(
         payload["moderation"] = normalized_moderation
     if normalized_compression is not None:
         payload["output_compression"] = normalized_compression
-    if stream:
+    if selected_stream:
         payload["stream"] = True
         payload["partial_images"] = 1
 
@@ -353,7 +363,9 @@ def generate_images(
         "requested_count": selected_count,
         "output_format": normalized_format,
         "timeout_seconds": selected_config.timeout_seconds,
-        "stream_requested": stream,
+        "provider_profile": config.provider_profile,
+        "size_source": size_source,
+        "stream_requested": selected_stream,
     }
     if dry_run:
         base_report.update(
@@ -370,7 +382,7 @@ def generate_images(
     started = time.monotonic()
     client = ImageClient(selected_config)
     try:
-        if stream:
+        if selected_stream:
             generation = client.generate_stream(payload)
         else:
             response, headers = client.generate(payload)
@@ -482,14 +494,14 @@ def parse_args() -> argparse.Namespace:
         "--stream",
         dest="stream",
         action="store_true",
-        default=True,
-        help="Request SSE progress events (default)",
+        default=None,
+        help="Explicitly request SSE progress events",
     )
     streaming.add_argument(
         "--no-stream",
         dest="stream",
         action="store_false",
-        help="Request a single JSON response",
+        help="Explicitly request a single JSON response",
     )
     parser.add_argument("--dry-run", action="store_true", help="Validate without network or file writes")
     parser.add_argument(

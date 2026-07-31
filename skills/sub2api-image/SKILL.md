@@ -1,11 +1,11 @@
 ---
 name: sub2api-image
-description: Generate and edit raster images through a configured Sub2API OpenAI-compatible Images API, save PNG/JPEG/WebP files locally, and verify actual size, count, format, and billing tier. Use when the user asks to create, draw, render, or edit a bitmap image with Sub2API, including cover art, posters, product images, exact or automatic sizing, 1K/2K/4K tiers, multiple reference images, masks, transparent backgrounds, installation checks, or named local output files. Do not use for image analysis, API-only questions, pricing discussion without generation, or code-native HTML/CSS/SVG work.
+description: Generate and edit raster images through a configured Sub2API OpenAI-compatible Images API, defaulting to its OpenAI OAuth image-account bridge, save PNG/JPEG/WebP files locally, and verify actual size, count, format, and billing tier. Use when the user asks to create, draw, render, or edit a bitmap image with Sub2API, including verified OAuth 1K/2K presets, exact or automatic sizing, reference images, masks, transparent backgrounds, installation checks, or named local output files. Do not use for image analysis, API-only questions, pricing discussion without generation, or code-native HTML/CSS/SVG work.
 ---
 
 # Sub2API Image
 
-Use the bundled standard-library Python clients. Send requests only to the configured Sub2API endpoint; never substitute an upstream-provider key or the built-in image tool.
+Use the bundled standard-library Python clients. The default `sub2api-openai-oauth` profile targets Sub2API 0.1.169 with OpenAI OAuth image accounts. Send requests only to the configured Sub2API endpoint; never substitute an upstream-provider key or the built-in image tool.
 
 ## Workflow
 
@@ -13,7 +13,7 @@ Use the bundled standard-library Python clients. Send requests only to the confi
 2. Parse the operation, prompt, tier or exact size, orientation, count, model, format, output path, input images, mask, and optional native image parameters.
 3. For a clear generation or edit request, invoke `generate.py` or `edit.py` exactly once. The client loads and validates configuration itself. Do not run `configure.py --show`, a Python probe, or `--dry-run` first.
 4. Treat a clear request to generate or edit as authorization for one billable API request. Do not ask for a second conversational confirmation. A Codex sandbox approval may still appear when required by the user's security policy.
-5. Default an omitted resolution to `1K` square. Ask once only when the user provides an ambiguous term such as "HD" or when a missing choice materially changes the result.
+5. Default an omitted resolution to `1K` square. For OAuth presets, use only `1K` square, `2K` landscape, or `2K` portrait. If another preset is requested, report the local validation error or use an exact `--size` only when that exact backend capability is known. Ask once only when a missing choice materially changes the result.
 6. Use `--dry-run` only when the user explicitly asks for a no-cost validation, after new configuration during troubleshooting, or when request options cannot be resolved safely. Never include `--dry-run` in the command intended to create the requested image.
 7. Read the JSON report. Treat `partial_images` as diagnostics, never final outputs. When local image viewing is available, inspect every final saved image for blank/error output and obvious prompt or edit mismatch.
 8. Report every absolute output path, requested model and size, actual dimensions, actual billing tier, and any visual-fidelity caveat.
@@ -43,7 +43,7 @@ Use `--show` only when the user asks to inspect or diagnose configuration. Use `
 ## Generate
 
 ```text
-<python> <skill-dir>/scripts/generate.py --prompt "A quiet city at dawn" --tier 1K --orientation landscape --output ./city.png
+<python> <skill-dir>/scripts/generate.py --prompt "A quiet city at dawn" --tier 1K --orientation square --output ./city.png
 ```
 
 For a native OS Pictures folder, use one command and let the client resolve the real known-folder path:
@@ -54,7 +54,9 @@ For a native OS Pictures folder, use one command and let the client resolve the 
 
 Use `--prompt-file` for long prompts. Use `--size auto` only when the upstream should choose dimensions; otherwise pass a validated `WIDTHxHEIGHT`. Use `--output-dir` for generated names or `--output` for an exact filename/multi-image basename. The output extension selects PNG, JPEG, or WebP unless `--output-format` is explicitly consistent. Never add `--overwrite` unless replacement is intended.
 
-Generation streams by default with `stream=true` and `partial_images=1`. A JSON response is accepted from the same request; never resend merely to change response parsing. Use `--no-stream` only when the deployed service is known not to accept streaming fields or the user explicitly requests a non-streaming compatibility check. Do not use it as an automatic retry after TLS, EOF, reset, or timeout failure.
+Generation under `sub2api-openai-oauth` defaults to one non-streaming JSON response. Use `--stream` only when progress events are explicitly wanted; it sends `stream=true` and `partial_images=1`. A JSON response is accepted from the same streaming request; never resend merely to change response parsing. `--no-stream` explicitly fixes JSON mode. Never use either switch as an automatic retry after TLS, EOF, reset, or timeout failure.
+
+The verified OAuth-native presets are `1024x1024` (1K square), `1536x1024` (2K landscape), and `1024x1536` (2K portrait). OAuth 1K landscape/portrait, 2K square, and 4K presets fail locally before a billable request. An exact `--size` bypasses only the preset allow-list, not legal-size validation or strict returned-byte matching. Never describe an unverified preset as supported.
 
 When a validated completed image arrives before a transport EOF, keep the final image and report `transport_warning`. When EOF occurs before completion, report ambiguous billing, save only validated files whose names contain `partial`, and state that they are not final images. Never issue a replacement generation request without new user authorization.
 

@@ -15,6 +15,7 @@ from typing import Any
 from image_client import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_OUTPUT_DIR,
+    default_stream_for_profile,
     ConfigError,
     ImageClient,
     SkillError,
@@ -106,6 +107,8 @@ def run_doctor(
             "api_key": "<configured>",
             "model": config.model,
             "timeout_seconds": config.timeout_seconds,
+            "provider_profile": config.provider_profile,
+            "default_stream": default_stream_for_profile(config.provider_profile),
             "credential_protection": credential_protection,
             "credential_readable": credential_readable,
         }

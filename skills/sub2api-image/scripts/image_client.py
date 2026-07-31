@@ -28,17 +28,18 @@ from urllib.request import Request, urlopen
 from image_stream import ImageStreamState, SSEEventError, SSEImageParser, SSEParseError
 
 
-DEFAULT_BASE_URL = "https://vibeai.tech/v1"
+DEFAULT_BASE_URL = "https://images.vibeai.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_OUTPUT_DIR = "generated_images"
 DEFAULT_TIMEOUT_SECONDS = 900
+DEFAULT_PROVIDER_PROFILE = "sub2api-openai-oauth"
 LEGACY_CONFIG_PATH = Path("~/.config/sub2api-image/config.json").expanduser()
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_ERROR_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 128 * 1024 * 1024
 MAX_IMAGE_BYTES = 100 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-USER_AGENT = "sub2api-image-skill/1.4"
+USER_AGENT = "sub2api-image-skill/1.5"
 WINDOWS_DPAPI_CURRENT_USER_SCHEME = "windows-dpapi-current-user"
 WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME = "windows-dpapi-local-machine"
 WINDOWS_DPAPI_SCHEME = WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME
@@ -62,6 +63,7 @@ CONFIG_ENV_VARS = {
     "model": "SUB2API_IMAGE_MODEL",
     "output_dir": "SUB2API_IMAGE_OUTPUT_DIR",
     "timeout_seconds": "SUB2API_IMAGE_TIMEOUT_SECONDS",
+    "provider_profile": "SUB2API_IMAGE_PROVIDER_PROFILE",
 }
 
 
@@ -101,21 +103,16 @@ def default_config_path(
 
 DEFAULT_CONFIG_PATH = default_config_path()
 
-SIZE_PRESETS = {
-    "1K": {
-        "square": "1024x1024",
-        "landscape": "1024x640",
-        "portrait": "640x1024",
-    },
-    "2K": {
-        "square": "2048x2048",
-        "landscape": "2048x1152",
-        "portrait": "1152x2048",
-    },
-    "4K": {
-        "square": "2880x2880",
-        "landscape": "3840x2160",
-        "portrait": "2160x3840",
+PROVIDER_PROFILES = {
+    DEFAULT_PROVIDER_PROFILE: {
+        "default_stream": False,
+        "presets": {
+            "1K": {"square": "1024x1024"},
+            "2K": {
+                "landscape": "1536x1024",
+                "portrait": "1024x1536",
+            },
+        },
     },
 }
 
@@ -297,6 +294,7 @@ class Config:
     model: str = DEFAULT_MODEL
     output_dir: str = DEFAULT_OUTPUT_DIR
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+    provider_profile: str = DEFAULT_PROVIDER_PROFILE
 
     def public_dict(self, path: Path | None = None) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -306,6 +304,8 @@ class Config:
             "model": self.model,
             "output_dir": self.output_dir,
             "timeout_seconds": self.timeout_seconds,
+            "provider_profile": self.provider_profile,
+            "default_stream": default_stream_for_profile(self.provider_profile),
         }
         if path is not None:
             result["config_path"] = str(path.resolve())
@@ -319,6 +319,7 @@ class ConfigState:
     model: str
     output_dir: str
     timeout_seconds: int
+    provider_profile: str = DEFAULT_PROVIDER_PROFILE
     credential_protection: str | None = None
     credential_error: CredentialDecryptionError | None = None
 
@@ -330,6 +331,7 @@ class ConfigState:
                 "model": self.model,
                 "output_dir": self.output_dir,
                 "timeout_seconds": self.timeout_seconds,
+                "provider_profile": self.provider_profile,
             }
         )
 
@@ -414,6 +416,19 @@ def validate_model(value: str) -> str:
     return model
 
 
+def validate_provider_profile(value: str) -> str:
+    profile = value.strip().lower()
+    if profile not in PROVIDER_PROFILES:
+        supported = ", ".join(sorted(PROVIDER_PROFILES))
+        raise ConfigError(f"Provider profile must be one of: {supported}")
+    return profile
+
+
+def default_stream_for_profile(provider_profile: str) -> bool:
+    profile = validate_provider_profile(provider_profile)
+    return bool(PROVIDER_PROFILES[profile]["default_stream"])
+
+
 def _positive_int(value: Any, name: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool):
         raise ConfigError(f"{name} must be an integer")
@@ -440,6 +455,9 @@ def config_from_mapping(data: Mapping[str, Any]) -> Config:
             "timeout_seconds",
             1,
             3600,
+        ),
+        provider_profile=validate_provider_profile(
+            str(data.get("provider_profile", DEFAULT_PROVIDER_PROFILE))
         ),
     )
 
@@ -589,6 +607,7 @@ def _config_payload(config: Config) -> dict[str, Any]:
         "model": config.model,
         "output_dir": config.output_dir,
         "timeout_seconds": config.timeout_seconds,
+        "provider_profile": config.provider_profile,
     }
     if os.name == "nt":
         payload["api_key_protection"] = WINDOWS_DPAPI_SCHEME
@@ -683,6 +702,7 @@ def read_config_state(
         model=public_config.model,
         output_dir=public_config.output_dir,
         timeout_seconds=public_config.timeout_seconds,
+        provider_profile=public_config.provider_profile,
         credential_protection=protection,
         credential_error=credential_error,
     )
@@ -706,6 +726,7 @@ def load_config(
             "model": state.model,
             "output_dir": state.output_dir,
             "timeout_seconds": state.timeout_seconds,
+            "provider_profile": state.provider_profile,
         }
     else:
         if "api_key" not in overrides:
@@ -908,7 +929,11 @@ def parse_size(value: str) -> tuple[int, int] | None:
 
 
 def resolve_size(
-    tier: str = "1K", orientation: str = "square", exact_size: str | None = None
+    tier: str = "1K",
+    orientation: str = "square",
+    exact_size: str | None = None,
+    *,
+    provider_profile: str = DEFAULT_PROVIDER_PROFILE,
 ) -> tuple[str, str | None]:
     if exact_size:
         parsed = parse_size(exact_size)
@@ -919,11 +944,20 @@ def resolve_size(
         return normalized, classify_dimensions(width, height)
     normalized_tier = tier.upper().strip()
     normalized_orientation = orientation.lower().strip()
-    if normalized_tier not in SIZE_PRESETS:
+    if normalized_tier not in {"1K", "2K", "4K"}:
         raise ConfigError("Tier must be one of 1K, 2K, or 4K")
-    if normalized_orientation not in SIZE_PRESETS[normalized_tier]:
+    if normalized_orientation not in {"square", "landscape", "portrait"}:
         raise ConfigError("Orientation must be square, landscape, or portrait")
-    return SIZE_PRESETS[normalized_tier][normalized_orientation], normalized_tier
+    profile = validate_provider_profile(provider_profile)
+    presets = PROVIDER_PROFILES[profile]["presets"]
+    size = presets.get(normalized_tier, {}).get(normalized_orientation)
+    if size is None:
+        raise ConfigError(
+            f"The {profile} profile has no verified {normalized_tier} "
+            f"{normalized_orientation} preset. Use a verified preset or pass an exact "
+            "--size supported by your OAuth image backend."
+        )
+    return str(size), normalized_tier
 
 
 def classify_http_error(status_code: int | None) -> str:

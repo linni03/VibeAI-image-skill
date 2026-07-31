@@ -481,8 +481,18 @@ class ConfigTests(unittest.TestCase):
                     configure_cli.configure(args, key_input_fn=lambda _prompt: "")
             self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), original)
 
+            original_unprotect = image_client._unprotect_api_key
+
+            def reject_only_old_credential(value: str) -> str:
+                if value == original["api_key_protected"]:
+                    raise failure
+                return original_unprotect(value)
+
             with (
-                patch("image_client._unprotect_api_key", side_effect=failure),
+                patch(
+                    "image_client._unprotect_api_key",
+                    side_effect=reject_only_old_credential,
+                ),
                 patch.object(configure_cli.sys.stdin, "isatty", return_value=True),
             ):
                 report = configure_cli.configure(
@@ -569,6 +579,7 @@ class ConfigTests(unittest.TestCase):
                     "SUB2API_IMAGE_BASE_URL": "https://images.example.test",
                     "SUB2API_IMAGE_MODEL": "image-model-env",
                     "SUB2API_IMAGE_TIMEOUT_SECONDS": "42",
+                    "SUB2API_IMAGE_PROVIDER_PROFILE": "sub2api-openai-oauth",
                     "OPENAI_API_KEY": "must-not-be-used",
                 },
                 clear=True,
@@ -578,6 +589,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.base_url, "https://images.example.test/v1")
             self.assertEqual(config.model, "image-model-env")
             self.assertEqual(config.timeout_seconds, 42)
+            self.assertEqual(config.provider_profile, "sub2api-openai-oauth")
 
             with patch.dict(
                 os.environ,
@@ -586,6 +598,24 @@ class ConfigTests(unittest.TestCase):
             ):
                 with self.assertRaises(ConfigError):
                     load_config(missing)
+
+    def test_legacy_config_without_profile_migrates_to_oauth_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "base_url": "https://images.example.test/v1",
+                        "api_key": "legacy-secret",
+                        "model": "gpt-image-2",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+            config = load_config(config_path, apply_env=False)
+        self.assertEqual(config.provider_profile, "sub2api-openai-oauth")
+        self.assertFalse(config.public_dict()["default_stream"])
 
 
 class SizeAndFormatTests(unittest.TestCase):
@@ -615,12 +645,13 @@ class SizeAndFormatTests(unittest.TestCase):
                 with self.subTest(filename=invalid), self.assertRaises(ConfigError):
                     pictures_output(invalid, directory=pictures)
 
-    def test_size_presets_match_billing_tiers(self) -> None:
-        self.assertEqual(resolve_size("1K", "landscape"), ("1024x640", "1K"))
-        self.assertEqual(resolve_size("1K", "portrait"), ("640x1024", "1K"))
-        self.assertEqual(resolve_size("2K", "portrait"), ("1152x2048", "2K"))
-        self.assertEqual(resolve_size("4K", "square"), ("2880x2880", "4K"))
-        self.assertEqual(resolve_size("4K", "landscape"), ("3840x2160", "4K"))
+    def test_oauth_profile_exposes_only_verified_presets(self) -> None:
+        self.assertEqual(resolve_size("1K", "square"), ("1024x1024", "1K"))
+        self.assertEqual(resolve_size("2K", "landscape"), ("1536x1024", "2K"))
+        self.assertEqual(resolve_size("2K", "portrait"), ("1024x1536", "2K"))
+        for tier, orientation in (("1K", "landscape"), ("2K", "square"), ("4K", "landscape")):
+            with self.subTest(tier=tier, orientation=orientation), self.assertRaises(ConfigError):
+                resolve_size(tier, orientation)
         self.assertEqual(resolve_size(exact_size="1536x1024"), ("1536x1024", "2K"))
         self.assertEqual(resolve_size(exact_size="auto"), ("auto", None))
 
@@ -679,6 +710,19 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(request_payload["size"], "1024x1024")
             self.assertEqual(request_payload["response_format"], "b64_json")
             self.assertNotIn("secret-test-key", json.dumps(report))
+
+    def test_unverified_oauth_preset_fails_before_network(self) -> None:
+        with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ConfigError) as caught:
+                generate_images(
+                    self.config(server),
+                    prompt="unsupported preset",
+                    tier="2K",
+                    orientation="square",
+                    output_dir=directory,
+                )
+            self.assertIn("no verified 2K square preset", str(caught.exception))
+            self.assertEqual(server.state.requests, [])
 
     def test_data_url_and_resolution_mismatch(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:
@@ -939,7 +983,9 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
             self.assertTrue(payload["dry_run"])
-            self.assertEqual(payload["requested_size"], "2048x1152")
+            self.assertEqual(payload["requested_size"], "1536x1024")
+            self.assertEqual(payload["provider_profile"], "sub2api-openai-oauth")
+            self.assertFalse(payload["stream_requested"])
             self.assertFalse(payload["network_request_sent"])
             self.assertFalse(payload["files_written"])
             self.assertEqual(server.state.requests, [])

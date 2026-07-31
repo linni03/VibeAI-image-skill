@@ -58,6 +58,7 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(config.base_url, installer.DEFAULT_BASE_URL)
         self.assertEqual(config.model, installer.DEFAULT_MODEL)
+        self.assertEqual(config.provider_profile, installer.DEFAULT_PROVIDER_PROFILE)
         self.assertIn("输入可见", key_prompts[0])
 
         with tempfile.TemporaryDirectory() as directory:
@@ -80,6 +81,7 @@ class InstallerTests(unittest.TestCase):
             model="existing-model",
             output_dir="existing-output",
             timeout_seconds=321,
+            provider_profile=installer.DEFAULT_PROVIDER_PROFILE,
         )
         config = installer.prompt_config(
             existing,
@@ -96,6 +98,7 @@ class InstallerTests(unittest.TestCase):
             model="existing-model",
             output_dir="existing-output",
             timeout_seconds=321,
+            provider_profile=installer.DEFAULT_PROVIDER_PROFILE,
             credential_protection="windows-dpapi-current-user",
             credential_error=failure,
         )
@@ -117,6 +120,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(config.model, existing.model)
         self.assertEqual(config.output_dir, existing.output_dir)
         self.assertEqual(config.timeout_seconds, existing.timeout_seconds)
+        self.assertEqual(config.provider_profile, existing.provider_profile)
 
     def test_validate_skill_source_requires_implicit_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

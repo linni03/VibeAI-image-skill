@@ -57,6 +57,11 @@ class DoctorTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertTrue(report["runtime"]["ok"])
         self.assertTrue(report["configuration"]["credential_readable"])
+        self.assertEqual(
+            report["configuration"]["provider_profile"],
+            "sub2api-openai-oauth",
+        )
+        self.assertFalse(report["configuration"]["default_stream"])
         self.assertTrue(report["output"]["parent_writable"])
         self.assertFalse(report["output"]["write_test_performed"])
         self.assertNotIn("network", report)

@@ -93,7 +93,12 @@ def edit_image(
     )
     selected_model = validate_model(model or config.model)
     selected_prompt = validate_prompt(prompt)
-    requested_size, requested_tier = resolve_size(tier, orientation, exact_size)
+    requested_size, requested_tier = resolve_size(
+        tier,
+        orientation,
+        exact_size,
+        provider_profile=config.provider_profile,
+    )
     _, requested_orientation = requested_shape(requested_size)
     selected_config = request_config(config, timeout_seconds)
 
@@ -182,6 +187,8 @@ def edit_image(
         "requested_count": selected_count,
         "output_format": normalized_format,
         "timeout_seconds": selected_config.timeout_seconds,
+        "provider_profile": config.provider_profile,
+        "size_source": "exact" if exact_size is not None else "profile_preset",
     }
     if mask_info:
         base_report["mask"] = mask_info

@@ -15,6 +15,7 @@ from image_client import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_PROVIDER_PROFILE,
     DEFAULT_TIMEOUT_SECONDS,
     LEGACY_CONFIG_PATH,
     ConfigState,
@@ -44,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", help="Default image model")
     parser.add_argument("--output-dir", help="Default image output directory")
     parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
+    parser.add_argument(
+        "--provider-profile",
+        default=None,
+        help=f"Provider profile (default: {DEFAULT_PROVIDER_PROFILE})",
+    )
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--show", action="store_true", help="Show non-secret settings")
     actions.add_argument("--revoke", action="store_true", help="Delete local configuration")
@@ -117,6 +123,8 @@ def configure(
         "timeout_seconds": args.timeout
         if args.timeout is not None
         else (existing.timeout_seconds if existing else DEFAULT_TIMEOUT_SECONDS),
+        "provider_profile": getattr(args, "provider_profile", None)
+        or (existing.provider_profile if existing else DEFAULT_PROVIDER_PROFILE),
     }
     config = config_from_mapping(mapping)
     written_path = save_config(config, path)

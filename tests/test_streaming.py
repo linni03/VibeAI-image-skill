@@ -134,6 +134,7 @@ class StreamingGenerationTests(unittest.TestCase):
                 self.config,
                 prompt="streamed image",
                 output_path=Path(directory) / "result.png",
+                stream=True,
             )
 
         self.assertTrue(report["ok"])
@@ -157,6 +158,7 @@ class StreamingGenerationTests(unittest.TestCase):
                 self.config,
                 prompt="fallback image",
                 output_dir=directory,
+                stream=True,
             )
 
         self.assertTrue(report["ok"])
@@ -176,7 +178,9 @@ class StreamingGenerationTests(unittest.TestCase):
         ) as request:
             output = Path(directory) / "result.png"
             with self.assertRaises(StreamInterruptedError) as caught:
-                generate_images(self.config, prompt="interrupted", output_path=output)
+                generate_images(
+                    self.config, prompt="interrupted", output_path=output, stream=True
+                )
 
             error = caught.exception.as_dict()["error"]
             self.assertEqual(error["category"], "tls_unexpected_eof")
@@ -202,7 +206,9 @@ class StreamingGenerationTests(unittest.TestCase):
             "image_client.urlopen", return_value=response
         ) as request:
             output = Path(directory) / "result.png"
-            report = generate_images(self.config, prompt="completed", output_path=output)
+            report = generate_images(
+                self.config, prompt="completed", output_path=output, stream=True
+            )
 
             self.assertTrue(output.is_file())
 
@@ -244,6 +250,7 @@ class StreamingGenerationTests(unittest.TestCase):
                             self.config,
                             prompt="failure",
                             output_dir=directory,
+                            stream=True,
                         )
                 error = caught.exception.as_dict()["error"]
                 self.assertEqual(error["category"], category)
@@ -265,6 +272,21 @@ class StreamingGenerationTests(unittest.TestCase):
         self.assertNotIn("stream", sent)
         self.assertNotIn("partial_images", sent)
         self.assertFalse(report["stream_requested"])
+
+    def test_oauth_profile_defaults_to_non_streaming_json(self) -> None:
+        payload = json.dumps({"data": [{"b64_json": self.encoded}]}).encode()
+        response = FakeResponse("application/json", [payload])
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "image_client.urlopen", return_value=response
+        ) as request:
+            report = generate_images(
+                self.config, prompt="OAuth default", output_dir=directory
+            )
+        sent = json.loads(request.call_args.args[0].data)
+        self.assertNotIn("stream", sent)
+        self.assertNotIn("partial_images", sent)
+        self.assertFalse(report["stream_requested"])
+        self.assertEqual(report["provider_profile"], "sub2api-openai-oauth")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,9 @@
 /.agents/
 /.codex/
 .runtime.json
+/task_plan.md
+/notes.md
+/verification_report.md
 
 # Secrets and local configuration
 .env

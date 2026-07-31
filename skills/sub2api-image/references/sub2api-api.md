@@ -13,7 +13,7 @@ Authenticate with a Sub2API image-enabled user key. The client does not implemen
 
 ## Requests
 
-Generation sends `model`, `prompt`, `size`, `n`, `response_format=b64_json`, and `output_format`. By default it also sends `stream=true` and `partial_images=1`; `--no-stream` omits both fields. Editing sends equivalent scalar multipart fields and repeats the `image` part for each local reference image. It sends at most one `mask` part.
+Generation sends `model`, `prompt`, `size`, `n`, `response_format=b64_json`, and `output_format`. The `sub2api-openai-oauth` profile defaults to a non-streaming JSON request and omits both `stream` and `partial_images`. Explicit `--stream` adds `stream=true` and `partial_images=1`; explicit `--no-stream` fixes JSON mode. Editing sends equivalent scalar multipart fields and repeats the `image` part for each local reference image. It sends at most one `mask` part.
 
 Optional supported fields include `quality`, `background`, `moderation`, `output_compression`, and edit `input_fidelity`. Transparent backgrounds require PNG or WebP. Output compression is an integer from 0 through 100 and applies only to JPEG or WebP.
 
@@ -23,7 +23,7 @@ Use `Cache-Control: no-store` and `Pragma: no-cache`. `b64_json` avoids an objec
 
 For JSON, require a non-empty `data[]`. Each item must contain valid `b64_json`, a data URL, or an HTTP(S) URL that decodes to PNG, JPEG, or WebP. Inspect file magic and actual dimensions before atomic save.
 
-For `text/event-stream`, parse incrementally across arbitrary byte boundaries. Support CRLF, comments/keepalives, multiline `data:`, `image_generation.partial_image`, `image_generation.completed`, explicit error events, and `[DONE]`. Reject malformed JSON and oversized events. If the response is JSON despite a streaming request, parse that same response without sending a second request.
+For an explicitly requested `text/event-stream`, parse incrementally across arbitrary byte boundaries. Support CRLF, comments/keepalives, multiline `data:`, `image_generation.partial_image`, `image_generation.completed`, explicit error events, and `[DONE]`. Reject malformed JSON and oversized events. If the response is JSON despite a streaming request, parse that same response without sending a second request.
 
 An EOF after a validated completed event leaves the final image usable but adds a transport warning. An EOF before completion is a failed, billing-ambiguous outcome: save validated partial images under clearly partial names, never report them as final, and never retry automatically.
 
@@ -50,3 +50,26 @@ Timeouts, TLS EOF, incomplete HTTP bodies, remote disconnects and connection res
 ## Billing Verification
 
 The client reports requested and actual tiers but cannot query administrator-only usage logs with a normal user key. Ask the Sub2API operator to verify `image_count`, `image_size`, `image_size_source`, `image_size_breakdown`, and charged amount separately.
+
+## Sub2API 0.1.169 Deployment Stability
+
+No Sub2API source patch is required for the OAuth profile. Keep the official gateway image timeouts at least as permissive as these values:
+
+```yaml
+gateway:
+  image_stream_data_interval_timeout: 900
+  image_stream_keepalive_interval: 10
+  image_nonstream_keepalive_interval: 0
+```
+
+For an Nginx image ingress, disable buffering and allow the full OAuth generation window:
+
+```nginx
+proxy_buffering off;
+proxy_request_buffering off;
+proxy_read_timeout 1800s;
+proxy_send_timeout 1800s;
+send_timeout 1800s;
+```
+
+Do not gzip `text/event-stream`, and do not cache `/v1/images/`. Prefer a direct image API hostname without a CDN hard timeout. If a short-timeout intermediary cannot be removed, `image_nonstream_keepalive_interval: 10` is a fallback, but it commits HTTP 200 after the first heartbeat; a direct long-timeout route is cleaner. Keep the OAuth image account group isolated and bind the image API key explicitly to that group. Pricing and group multipliers change billing only, not output dimensions or completion behavior.

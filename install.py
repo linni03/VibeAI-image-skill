@@ -30,6 +30,7 @@ from image_client import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
     DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_PROVIDER_PROFILE,
     DEFAULT_TIMEOUT_SECONDS,
     LEGACY_CONFIG_PATH,
     Config,
@@ -95,6 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--provider-profile", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -294,6 +296,7 @@ def prompt_config(
     model: str | None = None,
     output_dir: str | None = None,
     timeout_seconds: int | None = None,
+    provider_profile: str | None = None,
     input_fn: Callable[[str], str] = input,
     key_input_fn: Callable[[str], str] = input,
 ) -> Config:
@@ -329,6 +332,8 @@ def prompt_config(
             "timeout_seconds": timeout_seconds
             if timeout_seconds is not None
             else (existing.timeout_seconds if existing else DEFAULT_TIMEOUT_SECONDS),
+            "provider_profile": provider_profile
+            or (existing.provider_profile if existing else DEFAULT_PROVIDER_PROFILE),
         }
     )
 
@@ -374,6 +379,7 @@ def main() -> int:
             model=args.model,
             output_dir=args.output_dir,
             timeout_seconds=args.timeout,
+            provider_profile=args.provider_profile,
         )
         result = install_skill(
             SKILL_SOURCE,
@@ -409,6 +415,7 @@ def main() -> int:
             print("[OK] API Key 保护：配置文件权限 0600")
         print(f"[OK] Base URL: {config.base_url}")
         print(f"[OK] 模型：{config.model}")
+        print(f"[OK] Provider profile: {config.provider_profile}")
         print(f"[OK] 保护方式：{config_protection()}")
         if (
             existing is not None
@@ -426,7 +433,7 @@ def main() -> int:
             print(f"[WARN] 旧安装备份未能清理，保留于：{result.backup_path}")
 
         print("\n请重启 Codex 或新建 Codex 会话，让 Codex 重新加载 Skill。")
-        print("之后可直接说：生成一张 1K 横向图片并保存到当前目录。")
+        print("之后可直接说：生成一张 1K 方形图片并保存到当前目录。")
         print(f"也可以用 ${SKILL_NAME} 显式调用。")
         return 0
     except KeyboardInterrupt:
