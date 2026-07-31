@@ -17,7 +17,11 @@ SMOKE_PROMPT = "A simple blue geometric bird centered on a plain white backgroun
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a Sub2API image smoke test")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help=f"Configuration path (default: {DEFAULT_CONFIG_PATH})",
+    )
     parser.add_argument("--output-dir", type=Path)
     return parser.parse_args()
 

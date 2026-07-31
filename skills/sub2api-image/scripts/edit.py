@@ -33,6 +33,7 @@ from image_client import (
     ImageClient,
     inspect_image,
     load_config,
+    pictures_output,
     preflight_output_path,
     print_json,
     public_error,
@@ -272,6 +273,13 @@ def parse_args() -> argparse.Namespace:
     outputs = parser.add_mutually_exclusive_group()
     outputs.add_argument("--output", type=Path, help="Exact output filename or multi-image basename")
     outputs.add_argument("--output-dir", type=Path)
+    outputs.add_argument(
+        "--pictures",
+        nargs="?",
+        const="",
+        metavar="FILENAME",
+        help="Save in the OS Pictures folder, optionally with an exact filename",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--metadata",
@@ -282,7 +290,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout", type=int, help="Per-request timeout in seconds")
     parser.add_argument("--dry-run", action="store_true", help="Validate without network or file writes")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help=f"Configuration path (default: {DEFAULT_CONFIG_PATH})",
+    )
     return parser.parse_args()
 
 
@@ -291,6 +303,11 @@ def main() -> int:
     try:
         config = load_config(args.config)
         prompt = args.prompt if args.prompt is not None else read_prompt_file(args.prompt_file)
+        pictures_dir, pictures_path = (
+            pictures_output(args.pictures)
+            if args.pictures is not None
+            else (None, None)
+        )
         report = edit_image(
             config,
             image_path=args.image,
@@ -304,8 +321,8 @@ def main() -> int:
             quality=args.quality,
             input_fidelity=args.input_fidelity,
             output_format=args.output_format,
-            output_dir=args.output_dir,
-            output_path=args.output,
+            output_dir=pictures_dir or args.output_dir,
+            output_path=pictures_path or args.output,
             overwrite=args.overwrite,
             background=args.background,
             moderation=args.moderation,

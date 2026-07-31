@@ -16,14 +16,17 @@ from image_client import (
     DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_TIMEOUT_SECONDS,
+    LEGACY_CONFIG_PATH,
     Config,
     ConfigError,
     config_protection,
     config_from_mapping,
+    discover_config_path,
     load_config,
     print_json,
     public_error,
     save_config,
+    selected_config_path,
 )
 
 
@@ -31,7 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Securely configure the Sub2API image skill."
     )
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help=f"Configuration path (default: {DEFAULT_CONFIG_PATH})",
+    )
     parser.add_argument("--base-url", help="Sub2API base URL ending in /v1")
     parser.add_argument("--model", help="Default image model")
     parser.add_argument("--output-dir", help="Default image output directory")
@@ -42,23 +49,38 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def remove_config(path: Path) -> dict[str, object]:
-    expanded = path.expanduser()
-    try:
-        expanded.unlink()
-        removed = True
-    except FileNotFoundError:
-        removed = False
-    except OSError as exc:
-        raise ConfigError(f"Cannot remove configuration at {expanded}: {exc}") from exc
-    return {"ok": True, "removed": removed, "config_path": str(expanded.resolve())}
+def remove_config(path: Path | None) -> dict[str, object]:
+    primary = selected_config_path(path)
+    candidates = [primary]
+    if path is None and LEGACY_CONFIG_PATH != primary:
+        candidates.append(LEGACY_CONFIG_PATH)
+
+    removed_paths: list[str] = []
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        try:
+            expanded.unlink()
+            removed_paths.append(str(expanded.resolve()))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ConfigError(
+                f"Cannot remove configuration at {expanded}: {exc}"
+            ) from exc
+    return {
+        "ok": True,
+        "removed": bool(removed_paths),
+        "removed_paths": removed_paths,
+        "config_path": str(primary.resolve()),
+    }
 
 
 def configure(args: argparse.Namespace) -> dict[str, object]:
-    path = args.config.expanduser()
+    path = selected_config_path(args.config)
+    existing_path = discover_config_path(args.config)
     existing: Config | None = None
-    if path.exists():
-        existing = load_config(path, apply_env=False)
+    if existing_path.exists():
+        existing = load_config(existing_path, apply_env=False)
 
     if not sys.stdin.isatty():
         raise ConfigError(
@@ -87,6 +109,9 @@ def configure(args: argparse.Namespace) -> dict[str, object]:
     result = config.public_dict(written_path)
     result["ok"] = True
     result["credential_protection"] = config_protection()
+    if existing_path != path and existing_path.exists():
+        result["migrated_from"] = str(existing_path.resolve())
+        result["legacy_config_retained"] = True
     if os.name == "posix":
         result["permissions"] = oct(os.stat(written_path).st_mode & 0o777)
     return result
@@ -98,8 +123,8 @@ def main() -> int:
         if args.revoke:
             result = remove_config(args.config)
         elif args.show:
-            config = load_config(args.config)
-            config_path = args.config.expanduser()
+            config_path = discover_config_path(args.config)
+            config = load_config(config_path if config_path.exists() else args.config)
             result = config.public_dict(config_path if config_path.exists() else None)
             result["ok"] = True
             if config_path.exists():

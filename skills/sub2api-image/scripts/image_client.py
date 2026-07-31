@@ -18,7 +18,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote_to_bytes, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -28,16 +28,15 @@ DEFAULT_BASE_URL = "https://vibeai.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_OUTPUT_DIR = "generated_images"
 DEFAULT_TIMEOUT_SECONDS = 900
-DEFAULT_CONFIG_PATH = Path(
-    os.environ.get("SUB2API_IMAGE_CONFIG", "~/.config/sub2api-image/config.json")
-).expanduser()
+LEGACY_CONFIG_PATH = Path("~/.config/sub2api-image/config.json").expanduser()
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_ERROR_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 128 * 1024 * 1024
 MAX_IMAGE_BYTES = 100 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-USER_AGENT = "sub2api-image-skill/1.1"
+USER_AGENT = "sub2api-image-skill/1.2"
 WINDOWS_DPAPI_SCHEME = "windows-dpapi-current-user"
+WINDOWS_PICTURES_FOLDER_ID = "33e28130-4e1e-4676-835a-98395c3bc3bb"
 
 SIZE_ALIGNMENT = 16
 MIN_IMAGE_PIXELS = 655_360
@@ -52,6 +51,43 @@ CONFIG_ENV_VARS = {
     "output_dir": "SUB2API_IMAGE_OUTPUT_DIR",
     "timeout_seconds": "SUB2API_IMAGE_TIMEOUT_SECONDS",
 }
+
+
+def _installed_codex_home() -> Path | None:
+    skill_dir = Path(__file__).resolve().parent.parent
+    if skill_dir.parent.name.lower() != "skills":
+        return None
+    if not (skill_dir / ".runtime.json").is_file():
+        return None
+    return skill_dir.parent.parent
+
+
+def default_config_path(
+    *,
+    platform_name: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    home: Path | str | None = None,
+    codex_home: Path | str | None = None,
+) -> Path:
+    environment = os.environ if environ is None else environ
+    override = environment.get("SUB2API_IMAGE_CONFIG", "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    selected_home = Path(home).expanduser() if home is not None else Path.home()
+    if (platform_name or os.name) == "nt":
+        configured_codex_home = environment.get("CODEX_HOME", "").strip()
+        if codex_home is not None:
+            selected_codex_home = Path(codex_home).expanduser()
+        elif configured_codex_home:
+            selected_codex_home = Path(configured_codex_home).expanduser()
+        else:
+            selected_codex_home = _installed_codex_home() or selected_home / ".codex"
+        return selected_codex_home / "sub2api-image" / "config.json"
+    return selected_home / ".config" / "sub2api-image" / "config.json"
+
+
+DEFAULT_CONFIG_PATH = default_config_path()
 
 SIZE_PRESETS = {
     "1K": {
@@ -385,10 +421,30 @@ def _config_payload(config: Config) -> dict[str, Any]:
     return payload
 
 
+def selected_config_path(
+    path: Path | str | None = None, *, default_path: Path | str | None = None
+) -> Path:
+    selected = path if path is not None else default_path or DEFAULT_CONFIG_PATH
+    return Path(selected).expanduser()
+
+
+def discover_config_path(
+    path: Path | str | None = None,
+    *,
+    default_path: Path | str | None = None,
+    legacy_path: Path | str | None = None,
+) -> Path:
+    selected = selected_config_path(path, default_path=default_path)
+    legacy = Path(legacy_path or LEGACY_CONFIG_PATH).expanduser()
+    if path is None and not selected.exists() and legacy != selected and legacy.exists():
+        return legacy
+    return selected
+
+
 def load_config(
     path: Path | str | None = None, *, apply_env: bool = True
 ) -> Config:
-    config_path = Path(path).expanduser() if path else DEFAULT_CONFIG_PATH
+    config_path = discover_config_path(path)
     data: Mapping[str, Any]
     try:
         info = config_path.stat()
@@ -435,7 +491,7 @@ def load_config(
 
 
 def save_config(config: Config, path: Path | str | None = None) -> Path:
-    config_path = Path(path).expanduser() if path else DEFAULT_CONFIG_PATH
+    config_path = selected_config_path(path)
     parent = config_path.parent
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if os.name == "posix":
@@ -474,6 +530,91 @@ def save_config(config: Config, path: Path | str | None = None) -> Path:
             except OSError:
                 pass
     return config_path
+
+
+def _windows_pictures_directory() -> Path:
+    if os.name != "nt":
+        raise ConfigError("The Windows Pictures known folder is available only on Windows")
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("data1", wintypes.DWORD),
+                ("data2", wintypes.WORD),
+                ("data3", wintypes.WORD),
+                ("data4", ctypes.c_ubyte * 8),
+            ]
+
+        folder_id = GUID.from_buffer_copy(
+            uuid.UUID(WINDOWS_PICTURES_FOLDER_ID).bytes_le
+        )
+        selected = ctypes.c_wchar_p()
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+        operation = shell32.SHGetKnownFolderPath
+        operation.argtypes = [
+            ctypes.POINTER(GUID),
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
+        operation.restype = ctypes.c_long
+        result = operation(ctypes.byref(folder_id), 0, None, ctypes.byref(selected))
+        if result != 0:
+            raise ConfigError(
+                f"Windows could not resolve the Pictures known folder (HRESULT 0x{result & 0xFFFFFFFF:08X})"
+            )
+        try:
+            if not selected.value:
+                raise ConfigError("Windows returned an empty Pictures known folder path")
+            return Path(selected.value).resolve()
+        finally:
+            if selected:
+                ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+                ole32.CoTaskMemFree.restype = None
+                ole32.CoTaskMemFree(ctypes.cast(selected, ctypes.c_void_p))
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise ConfigError(
+            f"Windows Pictures known folder is unavailable ({type(exc).__name__})"
+        ) from exc
+
+
+def pictures_directory(
+    *,
+    platform_name: str | None = None,
+    home: Path | str | None = None,
+    windows_resolver: Callable[[], Path] | None = None,
+) -> Path:
+    if (platform_name or os.name) == "nt":
+        resolver = windows_resolver or _windows_pictures_directory
+        return Path(resolver()).expanduser().resolve()
+    selected_home = Path(home).expanduser() if home is not None else Path.home()
+    return (selected_home / "Pictures").resolve()
+
+
+def pictures_output(
+    filename: str | None,
+    *,
+    directory: Path | str | None = None,
+) -> tuple[Path | None, Path | None]:
+    selected_directory = (
+        Path(directory).expanduser().resolve()
+        if directory is not None
+        else pictures_directory()
+    )
+    if filename is None or filename == "":
+        return selected_directory, None
+    if filename in {".", ".."} or "/" in filename or "\\" in filename:
+        raise ConfigError("--pictures accepts a filename, not a path")
+    selected_name = Path(filename)
+    if selected_name.is_absolute() or selected_name.name != filename:
+        raise ConfigError("--pictures accepts a filename, not a path")
+    return None, selected_directory / selected_name
 
 
 def classify_dimensions(width: int, height: int) -> str:

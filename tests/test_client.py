@@ -13,6 +13,7 @@ import unittest
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -20,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "skills" / "sub2api-image" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import configure as configure_cli  # noqa: E402
 from edit import edit_image  # noqa: E402
 from generate import generate_images  # noqa: E402
 from image_client import (  # noqa: E402
@@ -28,10 +30,14 @@ from image_client import (  # noqa: E402
     ConfigError,
     ImageClient,
     ImageValidationError,
+    default_config_path,
+    discover_config_path,
     inspect_image,
     load_config,
     normalize_base_url,
     parse_size,
+    pictures_directory,
+    pictures_output,
     resolve_size,
     save_config,
 )
@@ -169,6 +175,112 @@ class MockServer:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_platform_default_config_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            codex_home = Path(directory) / "codex-home"
+            self.assertEqual(
+                default_config_path(
+                    platform_name="nt",
+                    environ={},
+                    home=home,
+                ),
+                home / ".codex" / "sub2api-image" / "config.json",
+            )
+            self.assertEqual(
+                default_config_path(
+                    platform_name="nt",
+                    environ={},
+                    home=home,
+                    codex_home=codex_home,
+                ),
+                codex_home / "sub2api-image" / "config.json",
+            )
+            self.assertEqual(
+                default_config_path(
+                    platform_name="posix",
+                    environ={},
+                    home=home,
+                ),
+                home / ".config" / "sub2api-image" / "config.json",
+            )
+            override = Path(directory) / "override.json"
+            self.assertEqual(
+                default_config_path(
+                    platform_name="nt",
+                    environ={"SUB2API_IMAGE_CONFIG": str(override)},
+                    home=home,
+                ),
+                override,
+            )
+
+    def test_legacy_config_is_read_without_deleting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "codex" / "sub2api-image" / "config.json"
+            legacy = Path(directory) / "legacy" / "config.json"
+            config = Config("https://example.test/v1", "secret-test-key")
+            save_config(config, legacy)
+
+            self.assertEqual(
+                discover_config_path(
+                    default_path=target,
+                    legacy_path=legacy,
+                ),
+                legacy,
+            )
+            with (
+                patch("image_client.DEFAULT_CONFIG_PATH", target),
+                patch("image_client.LEGACY_CONFIG_PATH", legacy),
+            ):
+                self.assertEqual(load_config(), config)
+            self.assertTrue(legacy.is_file())
+
+    def test_interactive_configure_migrates_and_retains_legacy_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "codex" / "sub2api-image" / "config.json"
+            legacy = Path(directory) / "legacy" / "config.json"
+            config = Config("https://example.test/v1", "secret-test-key")
+            save_config(config, legacy)
+            args = SimpleNamespace(
+                config=None,
+                base_url=None,
+                model=None,
+                output_dir=None,
+                timeout=None,
+            )
+
+            with (
+                patch("image_client.DEFAULT_CONFIG_PATH", target),
+                patch("image_client.LEGACY_CONFIG_PATH", legacy),
+                patch.object(configure_cli.sys.stdin, "isatty", return_value=True),
+                patch.object(configure_cli.getpass, "getpass", return_value=""),
+            ):
+                report = configure_cli.configure(args)
+
+            self.assertEqual(report["migrated_from"], str(legacy.resolve()))
+            self.assertTrue(report["legacy_config_retained"])
+            self.assertEqual(load_config(target), config)
+            self.assertTrue(legacy.is_file())
+
+    def test_revoke_removes_current_and_retained_legacy_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "codex" / "sub2api-image" / "config.json"
+            legacy = Path(directory) / "legacy" / "config.json"
+            config = Config("https://example.test/v1", "secret-test-key")
+            save_config(config, target)
+            save_config(config, legacy)
+
+            with (
+                patch("image_client.DEFAULT_CONFIG_PATH", target),
+                patch.object(configure_cli, "LEGACY_CONFIG_PATH", legacy),
+            ):
+                report = configure_cli.remove_config(None)
+
+            self.assertTrue(report["removed"])
+            self.assertEqual(len(report["removed_paths"]), 2)
+            self.assertFalse(target.exists())
+            self.assertFalse(legacy.exists())
+
     def test_normalize_base_url(self) -> None:
         self.assertEqual(normalize_base_url("https://example.test"), "https://example.test/v1")
         self.assertEqual(normalize_base_url("https://example.test/v1/"), "https://example.test/v1")
@@ -244,6 +356,32 @@ class ConfigTests(unittest.TestCase):
 
 
 class SizeAndFormatTests(unittest.TestCase):
+    def test_pictures_known_folder_and_safe_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pictures = Path(directory) / "Redirected Pictures"
+            self.assertEqual(
+                pictures_directory(
+                    platform_name="nt",
+                    windows_resolver=lambda: pictures,
+                ),
+                pictures.resolve(),
+            )
+            output_dir, output_path = pictures_output(
+                "healing_pixel_landscape_2k.png",
+                directory=pictures,
+            )
+            self.assertIsNone(output_dir)
+            self.assertEqual(
+                output_path,
+                pictures.resolve() / "healing_pixel_landscape_2k.png",
+            )
+            directory_only, generated_path = pictures_output("", directory=pictures)
+            self.assertEqual(directory_only, pictures.resolve())
+            self.assertIsNone(generated_path)
+            for invalid in ("../escape.png", "folder/image.png", "folder\\image.png"):
+                with self.subTest(filename=invalid), self.assertRaises(ConfigError):
+                    pictures_output(invalid, directory=pictures)
+
     def test_size_presets_match_billing_tiers(self) -> None:
         self.assertEqual(resolve_size("1K", "landscape"), ("1024x640", "1K"))
         self.assertEqual(resolve_size("1K", "portrait"), ("640x1024", "1K"))
@@ -298,6 +436,7 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(inspect_image(image_path.read_bytes()).width, 1024)
 
             captured = server.state.requests[0]
+            self.assertEqual(len(server.state.requests), 1)
             self.assertEqual(captured["path"], "/v1/images/generations")
             headers = captured["headers"]
             self.assertEqual(headers["authorization"], "Bearer secret-test-key")
@@ -537,6 +676,40 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(payload["request"]["prompt"], "A clean product photo")
             self.assertEqual(server.state.requests, [])
             self.assertFalse(output_path.exists())
+
+    def test_pictures_cli_resolves_without_extra_probe_or_file_write(self) -> None:
+        with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            filename = f"sub2api-pictures-test-{Path(directory).name}.png"
+            save_config(self.config(server), config_path)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "generate.py"),
+                    "--prompt",
+                    "A soothing pixel-art landscape",
+                    "--tier",
+                    "2K",
+                    "--orientation",
+                    "landscape",
+                    "--pictures",
+                    filename,
+                    "--dry-run",
+                    "--config",
+                    str(config_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(payload["requested_size"], "2048x1152")
+            self.assertFalse(payload["network_request_sent"])
+            self.assertFalse(payload["files_written"])
+            self.assertEqual(server.state.requests, [])
 
     def test_output_compression_validation_and_dry_run(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:

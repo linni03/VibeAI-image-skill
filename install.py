@@ -32,10 +32,13 @@ from image_client import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_TIMEOUT_SECONDS,
+    LEGACY_CONFIG_PATH,
     Config,
     ConfigError,
     config_protection,
     config_from_mapping,
+    default_config_path,
+    discover_config_path,
     load_config,
     save_config,
 )
@@ -86,7 +89,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=DEFAULT_CONFIG_PATH,
         help=f"配置文件路径（默认：{DEFAULT_CONFIG_PATH}）",
     )
     parser.add_argument("--model", help=argparse.SUPPRESS)
@@ -321,7 +323,6 @@ def prompt_config(
 
 def main() -> int:
     args = parse_args()
-    config_path = args.config.expanduser()
     try:
         validate_skill_source(SKILL_SOURCE)
         if not sys.stdin.isatty():
@@ -331,6 +332,16 @@ def main() -> int:
 
         platform_name = detect_platform()
         codex_home = resolve_codex_home(args.codex_home)
+        config_path = (
+            args.config.expanduser()
+            if args.config is not None
+            else default_config_path(codex_home=codex_home)
+        )
+        existing_config_path = discover_config_path(
+            args.config,
+            default_path=config_path,
+            legacy_path=LEGACY_CONFIG_PATH,
+        )
 
         print("VibeAI Sub2API 图像 Skill 安装器")
         print(f"检测到系统：{platform_name}")
@@ -339,7 +350,7 @@ def main() -> int:
         print(f"配置文件：{config_path.resolve()}")
         print("直接按回车即可采用方括号中的默认值。\n")
 
-        existing = read_existing_config(config_path)
+        existing = read_existing_config(existing_config_path)
         config = prompt_config(
             existing,
             base_url=args.base_url,
@@ -370,6 +381,9 @@ def main() -> int:
         action = "已更新" if result.updated else "已安装"
         print(f"\n[OK] Skill {action}：{result.target}")
         print(f"[OK] 配置已保存：{written_config.resolve()}")
+        if existing_config_path != config_path and existing_config_path.exists():
+            print(f"[OK] 已从旧配置迁移：{existing_config_path.resolve()}")
+            print("[INFO] 旧配置文件已保留，可在确认新版本正常后手动删除")
         if os.name == "nt":
             print("[OK] API Key 保护：Windows DPAPI（仅当前 Windows 用户可解密）")
         else:
