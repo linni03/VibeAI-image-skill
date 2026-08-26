@@ -22,6 +22,13 @@ from image_client import CredentialDecryptionError  # noqa: E402
 
 
 class InstallerTests(unittest.TestCase):
+    def test_platform_launchers_keep_one_step_update_entrypoint(self) -> None:
+        shell_launcher = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+        batch_launcher = (REPO_ROOT / "install.bat").read_text(encoding="utf-8")
+
+        self.assertIn('"$script_dir/install.py" "$@"', shell_launcher)
+        self.assertIn('"%~dp0install.py" %*', batch_launcher)
+
     def test_fresh_install_and_update_replace_the_skill_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             codex_home = Path(directory) / "codex"
@@ -32,6 +39,13 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(first.updated)
             self.assertTrue((target / "SKILL.md").is_file())
             self.assertFalse((target / "scripts" / "__pycache__").exists())
+            runtime = json.loads((target / ".runtime.json").read_text(encoding="utf-8"))
+            self.assertEqual(runtime["skill_version"], installer.SKILL_VERSION)
+
+            config_dir = codex_home / "sub2api-image"
+            config_dir.mkdir()
+            preserved_config = config_dir / "config.json"
+            preserved_config.write_text("user-owned-config", encoding="utf-8")
 
             stale = target / "stale-file.txt"
             stale.write_text("old installation", encoding="utf-8")
@@ -43,6 +57,10 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((target / "scripts" / "generate.py").is_file())
             self.assertTrue((target / "scripts" / "image_stream.py").is_file())
             self.assertTrue((target / "scripts" / "doctor.py").is_file())
+            self.assertEqual(
+                preserved_config.read_text(encoding="utf-8"),
+                "user-owned-config",
+            )
 
     def test_prompt_config_uses_defaults_and_saves_private_file(self) -> None:
         key_prompts: list[str] = []
@@ -90,6 +108,28 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(config, existing)
 
+    def test_reusable_config_preserves_existing_values_without_prompt(self) -> None:
+        existing = installer.ConfigState(
+            base_url="https://images.example.test/v1",
+            api_key="existing-secret",
+            model="existing-model",
+            output_dir="existing-output",
+            timeout_seconds=321,
+            provider_profile=installer.DEFAULT_PROVIDER_PROFILE,
+        )
+
+        self.assertEqual(
+            installer.reusable_config(existing),
+            installer.Config(
+                base_url=existing.base_url,
+                api_key="existing-secret",
+                model=existing.model,
+                output_dir=existing.output_dir,
+                timeout_seconds=existing.timeout_seconds,
+                provider_profile=existing.provider_profile,
+            ),
+        )
+
     def test_prompt_config_requires_replacement_for_unreadable_key(self) -> None:
         failure = CredentialDecryptionError("unreadable")
         existing = installer.ConfigState(
@@ -126,6 +166,7 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "sub2api-image"
             (source / "agents").mkdir(parents=True)
+            (source / "references").mkdir()
             (source / "scripts").mkdir()
             (source / "SKILL.md").write_text(
                 "---\nname: sub2api-image\ndescription: Test\n---\n",
@@ -142,8 +183,15 @@ class InstallerTests(unittest.TestCase):
                 "image_client.py",
                 "image_stream.py",
                 "doctor.py",
+                "smoke_test.py",
             ):
                 (source / "scripts" / name).write_text("", encoding="utf-8")
+            for name in (
+                "model-capabilities.md",
+                "sub2api-api.md",
+                "transport-and-billing.md",
+            ):
+                (source / "references" / name).write_text("", encoding="utf-8")
 
             with self.assertRaises(installer.InstallError):
                 installer.validate_skill_source(source)

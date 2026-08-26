@@ -16,8 +16,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "skills" / "sub2api-image" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+from edit import edit_image  # noqa: E402
 from generate import generate_images  # noqa: E402
-from image_client import Config, StreamInterruptedError  # noqa: E402
+from image_client import APIError, Config, StreamInterruptedError  # noqa: E402
 from image_stream import SSEEventError, SSEImageParser, SSEParseError  # noqa: E402
 
 
@@ -94,6 +95,16 @@ class SSEParserTests(unittest.TestCase):
         self.assertEqual(state.partial_data[0]["partial_image_index"], 0)
         self.assertEqual(state.data, [{"b64_json": encoded}])
 
+    def test_edit_events_are_supported_without_done_marker(self) -> None:
+        encoded = base64.b64encode(b"edit").decode()
+        state = SSEImageParser()
+        state.feed(sse_event("image_edit.completed", b64_json=encoded))
+        parsed = state.finish()
+
+        self.assertFalse(parsed.done)
+        self.assertEqual(parsed.completed_count, 1)
+        self.assertEqual(parsed.data, [{"b64_json": encoded}])
+
     def test_malformed_error_and_size_limits_are_not_ignored(self) -> None:
         parser = SSEImageParser()
         with self.assertRaises(SSEParseError):
@@ -143,7 +154,12 @@ class StreamingGenerationTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
         sent = json.loads(request.call_args.args[0].data)
         self.assertTrue(sent["stream"])
-        self.assertEqual(sent["partial_images"], 1)
+        self.assertEqual(sent["partial_images"], 0)
+        self.assertTrue(report["client_request_id"].startswith("img-"))
+        self.assertEqual(
+            request.call_args.args[0].get_header("X-client-request-id"),
+            report["client_request_id"],
+        )
         self.assertIn(
             "text/event-stream", request.call_args.args[0].get_header("Accept")
         )
@@ -163,6 +179,28 @@ class StreamingGenerationTests(unittest.TestCase):
 
         self.assertTrue(report["ok"])
         self.assertEqual(report["response_mode"], "json")
+        self.assertEqual(request.call_count, 1)
+
+    def test_success_status_json_error_is_not_reported_as_missing_image(self) -> None:
+        payload = json.dumps(
+            {"error": {"type": "upstream_error", "message": "upstream failed"}}
+        ).encode()
+        response = FakeResponse("application/json", [payload])
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "image_client.urlopen", return_value=response
+        ) as request:
+            with self.assertRaises(APIError) as caught:
+                generate_images(
+                    self.config,
+                    prompt="error fallback",
+                    output_dir=directory,
+                    stream=True,
+                )
+
+        error = caught.exception.as_dict()["error"]
+        self.assertEqual(error["type"], "upstream_error")
+        self.assertEqual(error["message"], "upstream failed")
+        self.assertTrue(error["client_request_id"].startswith("img-"))
         self.assertEqual(request.call_count, 1)
 
     def test_partial_then_ssl_eof_saves_diagnostic_not_final(self) -> None:
@@ -216,6 +254,54 @@ class StreamingGenerationTests(unittest.TestCase):
         self.assertEqual(report["transport_warning"]["category"], "tls_unexpected_eof")
         self.assertTrue(report["transport_warning"]["final_image_received"])
         self.assertEqual(request.call_count, 1)
+
+    def test_completed_then_clean_eof_is_success_without_done_marker(self) -> None:
+        response = FakeResponse(
+            "text/event-stream",
+            [sse_event("image_generation.completed", b64_json=self.encoded)],
+        )
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "image_client.urlopen", return_value=response
+        ):
+            report = generate_images(
+                self.config,
+                prompt="completed cleanly",
+                output_path=Path(directory) / "result.png",
+                stream=True,
+            )
+
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["stream"]["terminal_event_received"])
+        self.assertFalse(report["stream"]["done_marker_received"])
+        self.assertNotIn("transport_warning", report)
+
+    def test_edit_stream_accepts_edit_completed_without_done_marker(self) -> None:
+        response = FakeResponse(
+            "text/event-stream",
+            [sse_event("image_edit.completed", b64_json=self.encoded)],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            source.write_bytes(make_png())
+            with patch("image_client.urlopen", return_value=response) as request:
+                report = edit_image(
+                    self.config,
+                    image_path=source,
+                    prompt="edit streamed image",
+                    output_path=root / "edited.png",
+                    stream=True,
+                )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["response_mode"], "sse")
+        self.assertTrue(report["stream"]["terminal_event_received"])
+        self.assertFalse(report["stream"]["done_marker_received"])
+        sent = request.call_args.args[0]
+        self.assertIn("text/event-stream", sent.get_header("Accept"))
+        self.assertIn(b'name="stream"', sent.data)
+        self.assertIn(b"true", sent.data)
+        self.assertIn(b'name="partial_images"', sent.data)
 
     def test_partial_eof_error_event_and_invalid_base64_fail_cleanly(self) -> None:
         cases = (
@@ -273,7 +359,7 @@ class StreamingGenerationTests(unittest.TestCase):
         self.assertNotIn("partial_images", sent)
         self.assertFalse(report["stream_requested"])
 
-    def test_oauth_profile_defaults_to_non_streaming_json(self) -> None:
+    def test_oauth_profile_defaults_to_zero_preview_stream(self) -> None:
         payload = json.dumps({"data": [{"b64_json": self.encoded}]}).encode()
         response = FakeResponse("application/json", [payload])
         with tempfile.TemporaryDirectory() as directory, patch(
@@ -283,9 +369,9 @@ class StreamingGenerationTests(unittest.TestCase):
                 self.config, prompt="OAuth default", output_dir=directory
             )
         sent = json.loads(request.call_args.args[0].data)
-        self.assertNotIn("stream", sent)
-        self.assertNotIn("partial_images", sent)
-        self.assertFalse(report["stream_requested"])
+        self.assertTrue(sent["stream"])
+        self.assertEqual(sent["partial_images"], 0)
+        self.assertTrue(report["stream_requested"])
         self.assertEqual(report["provider_profile"], "sub2api-openai-oauth")
 
 

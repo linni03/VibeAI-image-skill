@@ -24,6 +24,7 @@ from generate import (
     select_output_format,
     validate_count,
     validate_prompt,
+    save_interrupted_partials,
     write_metadata_report,
 )
 from image_client import (
@@ -31,10 +32,15 @@ from image_client import (
     DEFAULT_PROGRESS_INTERVAL_SECONDS,
     Config,
     ConfigError,
+    default_stream_for_profile,
+    GenerationResult,
     ImageClient,
     RequestHeartbeat,
+    StreamInterruptedError,
     inspect_image,
     load_config,
+    max_images_per_request,
+    new_client_request_id,
     pictures_output,
     preflight_output_path,
     print_json,
@@ -80,11 +86,12 @@ def edit_image(
     moderation: str | None = None,
     output_compression: int | None = None,
     timeout_seconds: int | None = None,
+    stream: bool | None = None,
     dry_run: bool = False,
     metadata: Path | str | None = None,
     heartbeat_interval_seconds: float = DEFAULT_PROGRESS_INTERVAL_SECONDS,
 ) -> dict[str, Any]:
-    selected_count = validate_count(count)
+    selected_count = validate_count(count, config.provider_profile)
     selected_output_format = select_output_format(output_format, output_path)
     (
         normalized_format,
@@ -104,6 +111,9 @@ def edit_image(
     )
     _, requested_orientation = requested_shape(requested_size)
     selected_config = request_config(config, timeout_seconds)
+    selected_stream = (
+        default_stream_for_profile(config.provider_profile) if stream is None else stream
+    )
 
     if output_path is not None and output_dir is not None:
         raise ConfigError("Use either --output or --output-dir, not both")
@@ -177,6 +187,9 @@ def edit_image(
         fields["moderation"] = normalized_moderation
     if normalized_compression is not None:
         fields["output_compression"] = str(normalized_compression)
+    if selected_stream:
+        fields["stream"] = "true"
+        fields["partial_images"] = "0"
 
     base_report: dict[str, Any] = {
         "ok": True,
@@ -191,7 +204,9 @@ def edit_image(
         "output_format": normalized_format,
         "timeout_seconds": selected_config.timeout_seconds,
         "provider_profile": config.provider_profile,
+        "max_images_per_request": max_images_per_request(config.provider_profile),
         "size_source": "exact" if exact_size is not None else "profile_preset",
+        "stream_requested": selected_stream,
     }
     if mask_info:
         base_report["mask"] = mask_info
@@ -216,12 +231,46 @@ def edit_image(
 
     started = time.monotonic()
     client = ImageClient(selected_config)
-    with RequestHeartbeat(
-        "edit",
-        selected_config.timeout_seconds,
-        interval_seconds=heartbeat_interval_seconds,
-    ):
-        response, headers = client.edit(fields, files)
+    client_request_id = new_client_request_id()
+    base_report["client_request_id"] = client_request_id
+    try:
+        with RequestHeartbeat(
+            "edit",
+            selected_config.timeout_seconds,
+            interval_seconds=heartbeat_interval_seconds,
+            client_request_id=client_request_id,
+        ):
+            if selected_stream:
+                generation = client.edit_stream(
+                    fields,
+                    files,
+                    expected_count=selected_count,
+                    client_request_id=client_request_id,
+                )
+            else:
+                response, headers = client.edit(
+                    fields,
+                    files,
+                    client_request_id=client_request_id,
+                )
+                generation = GenerationResult(
+                    response=response,
+                    headers=headers,
+                    response_mode="json",
+                )
+    except StreamInterruptedError as exc:
+        save_interrupted_partials(
+            client,
+            exc,
+            output_dir=output_dir,
+            output_path=output_path,
+            configured_output_dir=config.output_dir,
+            overwrite=overwrite,
+            operation="edit",
+        )
+        raise
+    response = generation.response
+    headers = generation.headers
     images = save_response_images(
         client,
         response,
@@ -245,8 +294,20 @@ def edit_image(
         "ok": ok,
         **matches,
         "elapsed_seconds": elapsed,
+        "response_mode": generation.response_mode,
         "images": images,
     }
+    if generation.response_mode == "sse":
+        report["stream"] = {
+            "completion_marker_received": bool(
+                generation.stream_done or generation.stream_terminal_event
+            ),
+            "done_marker_received": generation.stream_done,
+            "terminal_event_received": generation.stream_terminal_event,
+            "event_count": generation.stream_event_count,
+        }
+    if generation.transport_warning:
+        report["transport_warning"] = dict(generation.transport_warning)
     identifier = request_id(headers)
     if identifier:
         report["request_id"] = identifier
@@ -278,7 +339,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--size", help="auto or exact WIDTHxHEIGHT; overrides tier/orientation")
     parser.add_argument("--model")
-    parser.add_argument("--n", type=int, default=1)
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=1,
+        help="Images in this paid request; the OAuth profile permits only 1",
+    )
     parser.add_argument("--quality")
     parser.add_argument("--input-fidelity")
     parser.add_argument("--background", choices=BACKGROUNDS)
@@ -306,8 +372,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=int,
-        help="Per-request timeout in seconds (skill workflow: 180)",
+        help="Per-request socket timeout in seconds (skill workflow: 600)",
     )
+    stream_mode = parser.add_mutually_exclusive_group()
+    stream_mode.add_argument("--stream", dest="stream", action="store_true")
+    stream_mode.add_argument("--no-stream", dest="stream", action="store_false")
+    parser.set_defaults(stream=None)
     parser.add_argument("--dry-run", action="store_true", help="Validate without network or file writes")
     parser.add_argument(
         "--config",
@@ -347,6 +417,7 @@ def main() -> int:
             moderation=args.moderation,
             output_compression=args.output_compression,
             timeout_seconds=args.timeout,
+            stream=args.stream,
             dry_run=args.dry_run,
             metadata=args.metadata,
         )

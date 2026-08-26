@@ -33,6 +33,7 @@ from image_client import (  # noqa: E402
     DEFAULT_PROVIDER_PROFILE,
     DEFAULT_TIMEOUT_SECONDS,
     LEGACY_CONFIG_PATH,
+    SKILL_VERSION,
     Config,
     ConfigState,
     ConfigError,
@@ -55,6 +56,7 @@ class InstallResult:
     target: Path
     updated: bool
     backup_path: Path | None = None
+    version: str = SKILL_VERSION
 
 
 def detect_platform() -> str:
@@ -92,6 +94,11 @@ def parse_args() -> argparse.Namespace:
         "--config",
         type=Path,
         help=f"配置文件路径（默认：{DEFAULT_CONFIG_PATH}）",
+    )
+    parser.add_argument(
+        "--reconfigure",
+        action="store_true",
+        help="即使已有可读配置，也重新询问 Base URL 和 API Key",
     )
     parser.add_argument("--model", help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", help=argparse.SUPPRESS)
@@ -141,6 +148,7 @@ def _write_runtime_metadata(skill_dir: Path, platform_name: str) -> None:
         raise InstallError(f"Python executable is unavailable: {executable}")
     payload = {
         "schema_version": 1,
+        "skill_version": SKILL_VERSION,
         "platform": platform_name,
         "python_executable": str(executable),
     }
@@ -160,12 +168,16 @@ def validate_skill_source(source: Path) -> None:
     required = (
         "SKILL.md",
         "agents/openai.yaml",
+        "references/model-capabilities.md",
+        "references/sub2api-api.md",
+        "references/transport-and-billing.md",
         "scripts/configure.py",
         "scripts/generate.py",
         "scripts/edit.py",
         "scripts/image_client.py",
         "scripts/image_stream.py",
         "scripts/doctor.py",
+        "scripts/smoke_test.py",
     )
     missing = [name for name in required if not (source / name).is_file()]
     if missing:
@@ -289,6 +301,14 @@ def read_existing_config(path: Path) -> ConfigState | None:
     return read_config_state(expanded)
 
 
+def reusable_config(existing: Config | ConfigState) -> Config:
+    if isinstance(existing, Config):
+        return existing
+    if existing.api_key is None:
+        raise ConfigError("Existing Sub2API API Key is not readable")
+    return existing.with_api_key(existing.api_key)
+
+
 def prompt_config(
     existing: Config | ConfigState | None,
     *,
@@ -360,7 +380,7 @@ def main() -> int:
             legacy_path=LEGACY_CONFIG_PATH,
         )
 
-        print("VibeAI Sub2API 图像 Skill 安装器")
+        print(f"VibeAI Sub2API 图像 Skill 安装器 v{SKILL_VERSION}")
         print(f"检测到系统：{platform_name}")
         print(f"Python：{Path(sys.executable).resolve()}")
         print(f"Codex Home：{codex_home}")
@@ -373,14 +393,35 @@ def main() -> int:
                 "[WARN] 现有 Windows 密钥无法在当前安全上下文中解密；"
                 "将保留非敏感配置并要求输入替换密钥"
             )
-        config = prompt_config(
-            existing,
-            base_url=args.base_url,
-            model=args.model,
-            output_dir=args.output_dir,
-            timeout_seconds=args.timeout,
-            provider_profile=args.provider_profile,
+        has_overrides = any(
+            value is not None
+            for value in (
+                args.base_url,
+                args.model,
+                args.output_dir,
+                args.timeout,
+                args.provider_profile,
+            )
         )
+        can_reuse = (
+            existing is not None
+            and existing.api_key is not None
+            and not args.reconfigure
+            and not has_overrides
+        )
+        if can_reuse:
+            config = reusable_config(existing)
+            print("[INFO] 检测到可读的现有配置，本次更新将原样保留。")
+            print("[INFO] 如需修改配置，请重新运行并添加 --reconfigure。")
+        else:
+            config = prompt_config(
+                existing,
+                base_url=args.base_url,
+                model=args.model,
+                output_dir=args.output_dir,
+                timeout_seconds=args.timeout,
+                provider_profile=args.provider_profile,
+            )
         result = install_skill(
             SKILL_SOURCE,
             codex_home,
@@ -405,6 +446,7 @@ def main() -> int:
 
         action = "已更新" if result.updated else "已安装"
         print(f"\n[OK] Skill {action}：{result.target}")
+        print(f"[OK] Skill 版本：{result.version}")
         print(f"[OK] 配置已保存：{written_config.resolve()}")
         if existing_config_path != config_path and existing_config_path.exists():
             print(f"[OK] 已从旧配置迁移：{existing_config_path.resolve()}")

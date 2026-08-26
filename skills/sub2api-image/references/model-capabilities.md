@@ -2,7 +2,7 @@
 
 ## Known Behavior
 
-Sub2API 0.1.169 routes OpenAI OAuth image accounts through its Responses image-generation bridge. This skill defaults to the `sub2api-openai-oauth` profile and `gpt-image-2`. `/v1/models` can show that a model is routed, but it does not prove every account or bridge supports every image option.
+Sub2API routes OpenAI OAuth image accounts through a Responses image-generation bridge. This skill defaults to the conservative `sub2api-openai-oauth` profile and `gpt-image-2`. Do not infer image options from a Sub2API version string or a model listing; only verified request and returned-byte behavior belongs in this profile.
 
 Keep these facts separate:
 
@@ -32,6 +32,12 @@ Reject invalid sizes before sending a paid request and report the nearest legal 
 | `4K` | unsupported preset | unsupported preset | unsupported preset |
 
 Unsupported presets fail locally before network activity. They are not silently rounded, downgraded, or replaced. `--size WIDTHxHEIGHT` remains available for an exact size that the operator has separately validated; it must satisfy the client constraints above, and the returned bytes must match exactly.
+
+## Output Count
+
+The OAuth profile permits exactly one output per paid request. Although the OpenAI Images API supports `n`, Sub2API's OAuth path bridges through a Responses image tool whose multi-output contract is not verified. The client therefore rejects `n>1` before network activity.
+
+For multiple files, use separate sequential requests only when the user clearly requested that many outputs. Stop the sequence after any failure or ambiguous billing result. Multiple concepts inside one requested composition do not increase the output count.
 
 ## Billing Classification
 

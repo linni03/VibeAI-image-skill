@@ -16,7 +16,7 @@ from doctor import run_doctor  # noqa: E402
 from image_client import Config, save_config  # noqa: E402
 
 
-class FakeModelsResponse:
+class FakeHealthResponse:
     status = 200
     headers = {
         "Content-Type": "application/json",
@@ -33,7 +33,7 @@ class FakeModelsResponse:
         return self.status
 
     def read(self, _size: int = -1) -> bytes:
-        return b'{"data":[]}'
+        return b'{"status":"ok"}'
 
 
 class DoctorTests(unittest.TestCase):
@@ -61,14 +61,15 @@ class DoctorTests(unittest.TestCase):
             report["configuration"]["provider_profile"],
             "sub2api-openai-oauth",
         )
-        self.assertFalse(report["configuration"]["default_stream"])
+        self.assertTrue(report["configuration"]["default_stream"])
+        self.assertEqual(report["configuration"]["max_images_per_request"], 1)
         self.assertTrue(report["output"]["parent_writable"])
         self.assertFalse(report["output"]["write_test_performed"])
         self.assertNotIn("network", report)
         self.assertEqual(request.call_count, 0)
         self.assertNotIn("secret-test-key", json.dumps(report))
 
-    def test_network_doctor_uses_models_get_without_image_request(self) -> None:
+    def test_network_doctor_uses_health_get_without_image_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "config.json"
@@ -77,7 +78,7 @@ class DoctorTests(unittest.TestCase):
                 config_path,
             )
             with patch(
-                "image_client.urlopen", return_value=FakeModelsResponse()
+                "image_client.urlopen", return_value=FakeHealthResponse()
             ) as request:
                 report = run_doctor(
                     config_path=config_path,
@@ -88,10 +89,17 @@ class DoctorTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertFalse(report["network"]["image_request_sent"])
         self.assertFalse(report["network"]["billing_expected"])
+        self.assertFalse(report["network"]["authentication_checked"])
+        self.assertTrue(report["network"]["client_request_id"].startswith("img-"))
         self.assertEqual(report["network"]["request_id"], "req-models-test")
         sent = request.call_args.args[0]
         self.assertEqual(sent.get_method(), "GET")
-        self.assertEqual(sent.full_url, "https://images.example.test/v1/models")
+        self.assertEqual(sent.full_url, "https://images.example.test/health")
+        self.assertIsNone(sent.get_header("Authorization"))
+        self.assertEqual(
+            sent.get_header("X-client-request-id"),
+            report["network"]["client_request_id"],
+        )
         self.assertEqual(request.call_count, 1)
 
     def test_missing_config_prevents_network_probe(self) -> None:

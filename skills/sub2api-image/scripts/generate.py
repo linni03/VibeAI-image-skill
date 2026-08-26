@@ -21,6 +21,8 @@ from image_client import (
     GenerationResult,
     ImageClient,
     ImageValidationError,
+    max_images_per_request,
+    new_client_request_id,
     RequestHeartbeat,
     SkillError,
     StreamInterruptedError,
@@ -83,9 +85,15 @@ def request_id(headers: Mapping[str, str]) -> str | None:
     return None
 
 
-def validate_count(value: int) -> int:
-    if not 1 <= value <= 10:
-        raise ConfigError("Image count must be between 1 and 10")
+def validate_count(value: int, provider_profile: str) -> int:
+    maximum = max_images_per_request(provider_profile)
+    if not 1 <= value <= maximum:
+        if maximum == 1:
+            raise ConfigError(
+                f"Provider profile {provider_profile} supports exactly one image per paid "
+                "request; generate separate outputs as separate authorized requests"
+            )
+        raise ConfigError(f"Image count must be between 1 and {maximum}")
     return value
 
 
@@ -253,6 +261,7 @@ def save_interrupted_partials(
     output_path: Path | str | None,
     configured_output_dir: Path | str,
     overwrite: bool,
+    operation: str = "generate",
 ) -> None:
     items = exc.partial_response.get("data")
     if not isinstance(items, list) or not items:
@@ -262,7 +271,7 @@ def save_interrupted_partials(
             client,
             exc.partial_response,
             None if output_path is not None else output_dir or configured_output_dir,
-            operation="generate-partial",
+            operation=f"{operation}-partial",
             output_path=partial_output_path(output_path) if output_path is not None else None,
             overwrite=overwrite,
         )
@@ -298,7 +307,7 @@ def generate_images(
     metadata: Path | str | None = None,
     heartbeat_interval_seconds: float = DEFAULT_PROGRESS_INTERVAL_SECONDS,
 ) -> dict[str, Any]:
-    selected_count = validate_count(count)
+    selected_count = validate_count(count, config.provider_profile)
     selected_output_format = select_output_format(output_format, output_path)
     (
         normalized_format,
@@ -354,7 +363,7 @@ def generate_images(
         payload["output_compression"] = normalized_compression
     if selected_stream:
         payload["stream"] = True
-        payload["partial_images"] = 1
+        payload["partial_images"] = 0
 
     base_report: dict[str, Any] = {
         "ok": True,
@@ -367,6 +376,7 @@ def generate_images(
         "output_format": normalized_format,
         "timeout_seconds": selected_config.timeout_seconds,
         "provider_profile": config.provider_profile,
+        "max_images_per_request": max_images_per_request(config.provider_profile),
         "size_source": size_source,
         "stream_requested": selected_stream,
     }
@@ -384,16 +394,25 @@ def generate_images(
 
     started = time.monotonic()
     client = ImageClient(selected_config)
+    client_request_id = new_client_request_id()
+    base_report["client_request_id"] = client_request_id
     try:
         with RequestHeartbeat(
             "generate",
             selected_config.timeout_seconds,
             interval_seconds=heartbeat_interval_seconds,
+            client_request_id=client_request_id,
         ):
             if selected_stream:
-                generation = client.generate_stream(payload)
+                generation = client.generate_stream(
+                    payload,
+                    client_request_id=client_request_id,
+                )
             else:
-                response, headers = client.generate(payload)
+                response, headers = client.generate(
+                    payload,
+                    client_request_id=client_request_id,
+                )
                 generation = GenerationResult(
                     response=response,
                     headers=headers,
@@ -438,7 +457,11 @@ def generate_images(
     }
     if generation.response_mode == "sse":
         report["stream"] = {
-            "completion_marker_received": generation.stream_done,
+            "completion_marker_received": bool(
+                generation.stream_done or generation.stream_terminal_event
+            ),
+            "done_marker_received": generation.stream_done,
+            "terminal_event_received": generation.stream_terminal_event,
             "event_count": generation.stream_event_count,
         }
     if generation.transport_warning:
@@ -472,7 +495,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--size", help="auto or exact WIDTHxHEIGHT; overrides tier/orientation")
     parser.add_argument("--model")
-    parser.add_argument("--n", type=int, default=1)
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=1,
+        help="Images in this paid request; the OAuth profile permits only 1",
+    )
     parser.add_argument("--quality")
     parser.add_argument("--background", choices=BACKGROUNDS)
     parser.add_argument("--moderation", choices=MODERATION_LEVELS)
@@ -499,7 +527,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=int,
-        help="Per-request timeout in seconds (skill workflow: 180)",
+        help="Per-request socket timeout in seconds (skill workflow: 600)",
     )
     streaming = parser.add_mutually_exclusive_group()
     streaming.add_argument(
@@ -507,7 +535,7 @@ def parse_args() -> argparse.Namespace:
         dest="stream",
         action="store_true",
         default=None,
-        help="Explicitly request SSE progress events",
+        help="Explicitly request SSE keepalives and completion events",
     )
     streaming.add_argument(
         "--no-stream",

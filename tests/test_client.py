@@ -187,12 +187,12 @@ class MockServer:
 
 
 class ConfigTests(unittest.TestCase):
-    def test_new_configuration_defaults_to_three_minutes(self) -> None:
-        self.assertEqual(image_client.DEFAULT_TIMEOUT_SECONDS, 180)
+    def test_new_configuration_defaults_to_ten_minutes(self) -> None:
+        self.assertEqual(image_client.DEFAULT_TIMEOUT_SECONDS, 600)
         self.assertEqual(image_client.DEFAULT_PROGRESS_INTERVAL_SECONDS, 15)
         self.assertEqual(
             Config("https://images.example.test/v1", "secret").timeout_seconds,
-            180,
+            600,
         )
 
     def test_platform_default_config_paths(self) -> None:
@@ -631,7 +631,7 @@ class ConfigTests(unittest.TestCase):
             config_path.chmod(0o600)
             config = load_config(config_path, apply_env=False)
         self.assertEqual(config.provider_profile, "sub2api-openai-oauth")
-        self.assertFalse(config.public_dict()["default_stream"])
+        self.assertTrue(config.public_dict()["default_stream"])
 
 
 class SizeAndFormatTests(unittest.TestCase):
@@ -722,6 +722,10 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(headers["authorization"], "Bearer secret-test-key")
             self.assertEqual(headers["cache-control"], "no-store")
             self.assertEqual(headers["pragma"], "no-cache")
+            self.assertEqual(
+                headers["x-client-request-id"],
+                report["client_request_id"],
+            )
             request_payload = json.loads(captured["body"])
             self.assertEqual(request_payload["size"], "1024x1024")
             self.assertEqual(request_payload["response_format"], "b64_json")
@@ -786,6 +790,12 @@ class ClientIntegrationTests(unittest.TestCase):
         self.assertEqual(error["category"], "network_timeout")
         self.assertEqual(error["billing_status"], "ambiguous")
         self.assertFalse(error["retry_safe"])
+        self.assertTrue(error["client_request_id"].startswith("img-"))
+        sent = request.call_args.args[0]
+        self.assertEqual(
+            sent.get_header("X-client-request-id"),
+            error["client_request_id"],
+        )
 
     def test_heartbeat_emits_started_immediately(self) -> None:
         output = io.StringIO()
@@ -833,18 +843,21 @@ class ClientIntegrationTests(unittest.TestCase):
         )
         self.assertTrue(all(item["timeout_seconds"] == 180 for item in payloads))
 
-    def test_skill_requires_same_session_waiting_and_explicit_timeout(self) -> None:
-        skill = (REPO_ROOT / "skills" / "sub2api-image" / "SKILL.md").read_text(
-            encoding="utf-8"
+    def test_skill_references_and_oauth_runtime_invariants(self) -> None:
+        skill_dir = REPO_ROOT / "skills" / "sub2api-image"
+        for name in (
+            "transport-and-billing.md",
+            "sub2api-api.md",
+            "model-capabilities.md",
+        ):
+            self.assertTrue((skill_dir / "references" / name).is_file())
+        self.assertTrue(
+            image_client.default_stream_for_profile("sub2api-openai-oauth")
         )
-        self.assertIn("exactly once with `--timeout 180`", skill)
-        self.assertIn("retain the original command `session_id`", skill)
-        self.assertIn("outer `cell_id`", skill)
-        self.assertIn("Never reduce a command result to `output` alone", skill)
-        self.assertIn("intervals of up to 15 seconds", skill)
-        self.assertIn("Only an explicit client exit", skill)
-        self.assertIn("empty output", skill)
-        self.assertIn("Never start another client invocation", skill)
+        self.assertEqual(
+            image_client.max_images_per_request("sub2api-openai-oauth"),
+            1,
+        )
 
     def test_unverified_oauth_preset_fails_before_network(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:
@@ -947,6 +960,15 @@ class ClientIntegrationTests(unittest.TestCase):
                 )
 
             request_count = len(server.state.requests)
+            with self.assertRaises(ConfigError) as multi:
+                edit_image(
+                    self.config(server),
+                    image_path=source,
+                    prompt="two edits",
+                    count=2,
+                    output_dir=Path(directory) / "unused-multi",
+                )
+            self.assertIn("exactly one image", str(multi.exception))
             with self.assertRaises(ConfigError):
                 edit_image(
                     self.config(server),
@@ -967,39 +989,19 @@ class ClientIntegrationTests(unittest.TestCase):
                 )
             self.assertEqual(len(server.state.requests), request_count)
 
-    def test_exact_output_multi_numbering_and_overwrite_protection(self) -> None:
+    def test_oauth_multi_image_request_fails_before_network(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:
-            server.state.response_count = 2
             output = Path(directory) / "result.png"
-            report = generate_images(
-                self.config(server),
-                prompt="two tiles",
-                count=2,
-                output_path=output,
-            )
-            self.assertTrue(report["ok"])
-            paths = [Path(image["path"]) for image in report["images"]]
-            self.assertEqual([path.name for path in paths], ["result-01.png", "result-02.png"])
-            self.assertTrue(all(path.exists() for path in paths))
-
-            request_count = len(server.state.requests)
-            with self.assertRaises(ImageValidationError):
+            with self.assertRaises(ConfigError) as caught:
                 generate_images(
                     self.config(server),
                     prompt="two tiles",
                     count=2,
                     output_path=output,
                 )
-            self.assertEqual(len(server.state.requests), request_count)
-
-            replaced = generate_images(
-                self.config(server),
-                prompt="two replacement tiles",
-                count=2,
-                output_path=output,
-                overwrite=True,
-            )
-            self.assertTrue(replaced["ok"])
+            self.assertIn("exactly one image", str(caught.exception))
+            self.assertEqual(server.state.requests, [])
+            self.assertFalse(output.exists())
 
             collision = Path(directory) / "collision.png"
             with self.assertRaises(ConfigError):
@@ -1014,10 +1016,10 @@ class ClientIntegrationTests(unittest.TestCase):
 
     def test_count_and_format_mismatches_are_failures(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:
+            server.state.response_count = 2
             report = generate_images(
                 self.config(server),
                 prompt="draw",
-                count=2,
                 output_format="webp",
                 output_dir=directory,
             )
@@ -1124,7 +1126,7 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertTrue(payload["dry_run"])
             self.assertEqual(payload["requested_size"], "1536x1024")
             self.assertEqual(payload["provider_profile"], "sub2api-openai-oauth")
-            self.assertFalse(payload["stream_requested"])
+            self.assertTrue(payload["stream_requested"])
             self.assertFalse(payload["network_request_sent"])
             self.assertFalse(payload["files_written"])
             self.assertEqual(server.state.requests, [])

@@ -1,112 +1,80 @@
 ---
 name: sub2api-image
-description: Generate and edit raster images through a configured Sub2API OpenAI-compatible Images API, defaulting to its OpenAI OAuth image-account bridge, save PNG/JPEG/WebP files locally, and verify actual size, count, format, and billing tier. Use when the user asks to create, draw, render, or edit a bitmap image with Sub2API, including verified OAuth 1K/2K presets, exact or automatic sizing, reference images, masks, transparent backgrounds, installation checks, or named local output files. Do not use for image analysis, API-only questions, pricing discussion without generation, or code-native HTML/CSS/SVG work.
+description: Generate or edit raster images through a configured Sub2API Images API, using a conservative OpenAI OAuth profile, safe local file validation, traceable paid requests, and explicit multi-output handling. Use for Sub2API-backed PNG/JPEG/WebP creation or editing, including reference images, masks, exact output paths, installation checks, and transport-failure diagnosis. Do not use for image analysis, API-only questions, or code-native HTML/CSS/SVG work.
 ---
 
 # Sub2API Image
 
-Use the bundled standard-library Python clients. The default `sub2api-openai-oauth` profile targets Sub2API 0.1.169 with OpenAI OAuth image accounts. Send requests only to the configured Sub2API endpoint; never substitute an upstream-provider key or the built-in image tool.
+Use the bundled standard-library Python clients against the configured Sub2API endpoint. Never substitute an upstream key, another image provider, or the built-in image tool.
 
 ## Workflow
 
-1. Locate this skill directory and call its scripts in place. Do not copy them into the user's project.
-2. Parse the operation, prompt, tier or exact size, orientation, count, model, format, output path, input images, mask, and optional native image parameters.
-3. For a clear generation or edit request, invoke `generate.py` or `edit.py` exactly once with `--timeout 180`. The client loads and validates configuration itself. Do not run `configure.py --show`, a Python probe, or `--dry-run` first.
-4. Treat a clear request to generate or edit as authorization for one billable API request. Do not ask for a second conversational confirmation. A Codex sandbox approval may still appear when required by the user's security policy.
-5. Default an omitted resolution to `1K` square. For OAuth presets, use only `1K` square, `2K` landscape, or `2K` portrait. If another preset is requested, report the local validation error or use an exact `--size` only when that exact backend capability is known. Ask once only when a missing choice materially changes the result.
-6. Use `--dry-run` only when the user explicitly asks for a no-cost validation, after new configuration during troubleshooting, or when request options cannot be resolved safely. Never include `--dry-run` in the command intended to create the requested image.
-7. Preserve the complete structured command result. If execution yields, retain the original command `session_id`; an outer `cell_id` may only identify a wrapper that must be resumed to recover that command result. Never reduce a command result to `output` alone or discard its session handle.
-8. Resume the original command session at intervals of up to 15 seconds. Treat `image_request_started`, `image_request_pending`, `still running`, an outer cell completing without client JSON, empty output, and an absent target file as pending states. Only an explicit client exit with a final success or error JSON report is terminal. Never start another client invocation while the original may still be running.
-9. Treat `image_request_deadline_reached` as the 180-second caller deadline, not proof that the network request exited. Stop the same original command session if it is still running, perform one final output check, and report timeout failure with ambiguous billing. Treat `partial_images` as diagnostics, never final outputs. When local image viewing is available, inspect every final saved image for blank/error output and obvious prompt or edit mismatch.
-10. Report every absolute output path, requested model and size, actual dimensions, actual billing tier, and any visual-fidelity caveat.
-11. Treat any false `tier_match`, `orientation_match`, `exact_size_match`, `count_match`, or `format_match` as failure. A null size match means `size=auto` made that check inapplicable.
-12. Return actionable errors without exposing credentials. Read [references/sub2api-api.md](references/sub2api-api.md) for protocol or error troubleshooting. Read [references/model-capabilities.md](references/model-capabilities.md) before choosing custom sizes or diagnosing size failures.
+1. Locate this skill directory and run its scripts in place. Read `.runtime.json` directly and use its `python_executable` when it still exists; otherwise use Python 3.10 or newer.
+2. Resolve the operation, prompt, size, orientation, output format and path, model options, source images, mask, and requested output count before making a paid request.
+3. Distinguish concepts from files. "One image containing two categories" is one output; "two categories, one image each" is two outputs. Ask once when this distinction is materially ambiguous.
+4. The `sub2api-openai-oauth` profile supports exactly one image per paid request. Never pass `--n` above 1. A clear request for N separate outputs authorizes exactly N sequential paid requests, each with `--n 1` and a unique output path. Stop before the next request after any failure, ambiguous billing outcome, or user interruption. Never retry a failed request automatically.
+5. Invoke each paid generation or edit with `--timeout 600`. Do not run a probe or dry run first unless the user explicitly requests no-cost validation or troubleshooting requires it.
+6. Preserve the complete structured command result and original `session_id`. Resume that same session at intervals of up to 15 seconds. Pending output, an absent file, or an outer `cell_id` completing without final client JSON is not a terminal result.
+7. Treat only an explicit client exit with final JSON as terminal. A deadline signal is not proof the underlying request stopped. Never start a replacement invocation while the original command may still be running.
+8. Inspect every saved final image when local image viewing is available. Report absolute paths, requested and actual dimensions, tier, format, server request ID when present, and the always-present `client_request_id`.
+9. Treat false size, tier, orientation, count, or format matches as failure even if files were saved.
 
-## Runtime
-
-Read `<skill-dir>/.runtime.json` directly when present and use its absolute `python_executable` when that executable still exists. Do not launch a shell command only to probe Python. Otherwise use `py -3` then `python` on native Windows, or `python3` then `python` on macOS, Linux, and WSL. Require Python 3.10 or newer and treat `<python>` below as the resolved command.
-
-Execute each client invocation as one logical command with separate arguments. Do not combine runtime discovery, configuration inspection, and generation in one PowerShell command. Do not depend on Bash backslash continuations, PowerShell backticks, a `.py` file association, or the current working directory.
+Read [references/transport-and-billing.md](references/transport-and-billing.md) for TLS, EOF, timeout, sequential multi-output, and billing-ambiguity handling. Read [references/sub2api-api.md](references/sub2api-api.md) for the deployed wire contract. Read [references/model-capabilities.md](references/model-capabilities.md) before selecting custom sizes.
 
 ## Configure
 
-Use an interactive terminal so the key never appears in process arguments. Key input is intentionally visible, allowing the user to verify that typing or pasting succeeded; ensure nobody else can view the terminal:
+Run the interactive configuration script only when configuration is missing or the user asks to change it:
 
 ```text
 <python> <skill-dir>/scripts/configure.py
 ```
 
-On native Windows, store configuration at `%CODEX_HOME%\sub2api-image\config.json`, falling back to `%USERPROFILE%\.codex\sub2api-image\config.json`. Encrypt the API key with machine-scoped DPAPI so Codex's dedicated Windows sandbox users can decrypt it, and rely on the user-profile/Codex Home ACL to restrict ciphertext access. Never place the config in a shared directory. The client can read old current-user DPAPI and legacy `%USERPROFILE%\.config\sub2api-image\config.json` configurations; running the installer or interactive configure command migrates readable credentials and retains a legacy-path file. If an old credential cannot be decrypted, require a replacement key while preserving validated non-secret settings. On macOS, Linux, and WSL, use `~/.config/sub2api-image/config.json` with mode `0600`.
+Never print or place the key in commands, URLs, logs, metadata, filenames, or replies. Dedicated `SUB2API_IMAGE_*` variables may override configuration; never use a generic `OPENAI_API_KEY` or Codex credential.
 
-Never print, repeat, summarize, or place the key in a command. Warn that keys pasted into chat may remain in session records; ask the user to run the interactive command locally.
-
-Use `--show` only when the user asks to inspect or diagnose configuration. Use `--revoke` to remove current and retained legacy configuration. Dedicated `SUB2API_IMAGE_*` environment variables may override settings, but never read a generic `OPENAI_API_KEY` or a Codex credential. Do not weaken a config permission error.
+On Windows, configuration is under `%CODEX_HOME%\sub2api-image\config.json`, falling back to `%USERPROFILE%\.codex\sub2api-image\config.json`, with DPAPI protection. On macOS, Linux, and WSL it is under `~/.config/sub2api-image/config.json` with mode `0600`.
 
 ## Generate
 
 ```text
-<python> <skill-dir>/scripts/generate.py --prompt "A quiet city at dawn" --tier 1K --orientation square --output ./city.png --timeout 180
+<python> <skill-dir>/scripts/generate.py --prompt "A quiet city at dawn" --tier 1K --orientation square --output ./city.png --n 1 --timeout 600
 ```
 
-For a native OS Pictures folder, use one command and let the client resolve the real known-folder path:
+The OAuth profile defaults to SSE with `partial_images=0`. This supplies transport keepalives and completed events without purchasing preview images. A JSON response to the same request is accepted without resending. Use `--no-stream` only when explicitly required for diagnosis or compatibility, never as a retry strategy.
 
-```text
-<python> <skill-dir>/scripts/generate.py --prompt "A soothing pixel-art landscape" --tier 2K --orientation landscape --pictures healing_pixel_landscape_2k.png --timeout 180
-```
+Verified presets are `1024x1024` (1K square), `1536x1024` (2K landscape), and `1024x1536` (2K portrait). Unsupported presets fail locally. Exact `--size WIDTHxHEIGHT` bypasses only the preset allow-list and must still pass legal-size and returned-byte validation.
 
-Use `--prompt-file` for long prompts. Use `--size auto` only when the upstream should choose dimensions; otherwise pass a validated `WIDTHxHEIGHT`. Use `--output-dir` for generated names or `--output` for an exact filename/multi-image basename. The output extension selects PNG, JPEG, or WebP unless `--output-format` is explicitly consistent. Never add `--overwrite` unless replacement is intended.
-
-Generation under `sub2api-openai-oauth` defaults to one non-streaming JSON response. Use `--stream` only when progress events are explicitly wanted; it sends `stream=true` and `partial_images=1`. A JSON response is accepted from the same streaming request; never resend merely to change response parsing. `--no-stream` explicitly fixes JSON mode. Never use either switch as an automatic retry after TLS, EOF, reset, or timeout failure.
-
-The verified OAuth-native presets are `1024x1024` (1K square), `1536x1024` (2K landscape), and `1024x1536` (2K portrait). OAuth 1K landscape/portrait, 2K square, and 4K presets fail locally before a billable request. An exact `--size` bypasses only the preset allow-list, not legal-size validation or strict returned-byte matching. Never describe an unverified preset as supported.
-
-When a validated completed image arrives before a transport EOF, keep the final image and report `transport_warning`. When EOF occurs before completion, report ambiguous billing, save only validated files whose names contain `partial`, and state that they are not final images. Never issue a replacement generation request without new user authorization.
-
-Honor an explicit output path first. When the user says Pictures, My Pictures, 图片目录, or 图片文件夹 without an absolute path, pass `--pictures` with a safe filename. When the user asks for the current project or current directory, pass an explicit relative `--output` path inside the active workspace.
-
-Always pass `--timeout 180` for a paid generation. The client immediately emits `image_request_started`, then a secret-free `image_request_pending` heartbeat to stderr every 15 seconds while the synchronous request is pending. Preserve and resume the original command session until its final JSON report. Pass `--quality`, `--background`, `--moderation`, `--output-compression`, or `--metadata` only when requested or operationally needed. Transparent backgrounds require PNG or WebP; compression applies only to JPEG or WebP.
+Use `--prompt-file` for long prompts, `--pictures` for the native Pictures folder, and `--output` for an exact path. Never add `--overwrite` unless replacement is intended.
 
 ## Edit
 
 ```text
-<python> <skill-dir>/scripts/edit.py --image <absolute-source-path> --prompt "Replace the background with a snowy mountain" --timeout 180
+<python> <skill-dir>/scripts/edit.py --image <absolute-source-path> --prompt "Replace the background with a snowy mountain" --n 1 --timeout 600
 ```
 
-Repeat `--image` for multiple reference images. Add one `--mask` when supplied; its dimensions must match the first input image. Use only local PNG, JPEG, or WebP inputs. Do not silently resize inputs.
-
-Always pass `--timeout 180` for a paid edit and apply the same single-session waiting rules as generation.
+Editing uses the same default SSE, request tracing, terminal-event, timeout, and retry rules. Repeat `--image` for references and add one `--mask` when supplied. The mask dimensions must match the first input. Use local PNG, JPEG, or WebP files and never silently resize them.
 
 ## Validate Installation
 
-Run local, no-network diagnostics for an explicit installation or configuration check:
+Run local diagnostics without network access or image billing:
 
 ```text
 <python> <skill-dir>/scripts/doctor.py
 ```
 
-Add `--network` only when TLS, connectivity, or authentication must be tested. It calls `/models`, never an image endpoint, and reports no key:
+Add `--network` only to check DNS, TLS, and the image ingress `/health` route. It does not call an image endpoint, incur image billing, or verify API-key authorization:
 
 ```text
 <python> <skill-dir>/scripts/doctor.py --network
 ```
 
-Use a dry run when request options themselves need validation:
-
-```text
-<python> <skill-dir>/scripts/generate.py --prompt "Sub2API image configuration check" --size auto --dry-run
-```
-
-Run `<python> <skill-dir>/scripts/smoke_test.py` only when a real paid 1K generation is authorized. It checks authentication, decoding, atomic save, format, dimensions, and secret-free output, but cannot verify administrator-only usage logs or charges.
+Use `generate.py --dry-run` only for explicit no-cost option validation. Run `smoke_test.py` only after the user authorizes a real paid 1K generation.
 
 ## Safety
 
-- Keep one Sub2API image-enabled user key per user. Never use an upstream account key.
-- Never put a key in Git, command arguments, URLs, logs, metadata, filenames, or replies.
-- On native Windows, treat the config file ACL as part of credential protection; machine-scoped DPAPI is machine-bound rather than user-bound.
-- If the sandbox blocks a clear request, request one scoped approval for the actual generation or edit command. Do not use `--show` or `--dry-run` as a permission probe.
-- Never retry authentication, permission, validation, response-mismatch, network-timeout, or HTTP 524 failures automatically.
-- Treat missing files, empty command output, outer wrapper completion, and pending command sessions before the 180-second deadline as inconclusive, not failure.
-- Treat 524, TLS EOF, incomplete response, reset, disconnect, and client timeout failures as ambiguous paid outcomes. Check the image-only direct Base URL, proxy/origin timeouts, request ID, and usage logs before asking for retry approval.
-- Never silently downgrade size, model, count, quality, format, or other native options.
-- Keep returned images; remove only temporary files created during the current workflow.
-- Use only the deployed synchronous generation and edit endpoints. Do not invent async task routes.
+- Never retry authentication, permission, validation, response mismatch, TLS, EOF, reset, timeout, or HTTP 524 failures automatically.
+- Treat TLS/EOF/reset/timeout before a validated completed event as an ambiguous paid outcome. Report the `client_request_id` and do not tell the user a new request is free.
+- Keep a validated final image received before a later transport failure and report its transport warning. Partial images are diagnostics, never final output.
+- Do not continue a sequential multi-output job after an ambiguous request; report completed K of N outputs and the failed request's correlation details.
+- Never silently change model, size, tier, output count, quality, format, or other native options.
+- Use only the bundled synchronous generation and edit clients. Do not invent or probe unimplemented async routes.
+- Keep returned images and remove only temporary files created during the current workflow.

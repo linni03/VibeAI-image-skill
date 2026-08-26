@@ -158,6 +158,7 @@ class SSEImageParser:
 
         if event_type in {
             "image_generation.partial_image",
+            "image_edit.partial_image",
             "response.image_generation_call.partial_image",
         }:
             encoded = payload.get("b64_json")
@@ -172,7 +173,7 @@ class SSEImageParser:
             self.state.partial_data.append(item)
             return
 
-        if event_type == "image_generation.completed":
+        if event_type in {"image_generation.completed", "image_edit.completed"}:
             encoded = payload.get("b64_json")
             if not isinstance(encoded, str) or not encoded:
                 raise SSEParseError("Completed image event did not contain base64 image data")

@@ -21,6 +21,7 @@ from image_client import (
     SkillError,
     discover_config_path,
     load_config,
+    max_images_per_request,
     public_error,
     read_config_state,
 )
@@ -109,6 +110,7 @@ def run_doctor(
             "timeout_seconds": config.timeout_seconds,
             "provider_profile": config.provider_profile,
             "default_stream": default_stream_for_profile(config.provider_profile),
+            "max_images_per_request": max_images_per_request(config.provider_profile),
             "credential_protection": credential_protection,
             "credential_readable": credential_readable,
         }
@@ -142,7 +144,7 @@ def run_doctor(
                         network_timeout_seconds,
                     ),
                 )
-                report["network"] = ImageClient(network_config).probe_models()
+                report["network"] = ImageClient(network_config).probe_health()
                 report["network"]["timeout_seconds"] = network_config.timeout_seconds
             except Exception as exc:
                 report["network"] = {
@@ -178,7 +180,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--network",
         action="store_true",
-        help="Check TLS, authentication and /models connectivity without image billing",
+        help="Check TLS and the /health ingress route without image billing",
     )
     return parser.parse_args()
 

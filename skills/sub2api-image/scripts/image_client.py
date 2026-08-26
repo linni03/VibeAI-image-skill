@@ -33,16 +33,17 @@ from image_stream import ImageStreamState, SSEEventError, SSEImageParser, SSEPar
 DEFAULT_BASE_URL = "https://images.vibeai.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_OUTPUT_DIR = "generated_images"
-DEFAULT_TIMEOUT_SECONDS = 180
+DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_PROGRESS_INTERVAL_SECONDS = 15
 DEFAULT_PROVIDER_PROFILE = "sub2api-openai-oauth"
+SKILL_VERSION = "1.6.0"
 LEGACY_CONFIG_PATH = Path("~/.config/sub2api-image/config.json").expanduser()
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_ERROR_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 128 * 1024 * 1024
 MAX_IMAGE_BYTES = 100 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-USER_AGENT = "sub2api-image-skill/1.5"
+USER_AGENT = f"sub2api-image-skill/{SKILL_VERSION}"
 WINDOWS_DPAPI_CURRENT_USER_SCHEME = "windows-dpapi-current-user"
 WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME = "windows-dpapi-local-machine"
 WINDOWS_DPAPI_SCHEME = WINDOWS_DPAPI_LOCAL_MACHINE_SCHEME
@@ -108,7 +109,8 @@ DEFAULT_CONFIG_PATH = default_config_path()
 
 PROVIDER_PROFILES = {
     DEFAULT_PROVIDER_PROFILE: {
-        "default_stream": False,
+        "default_stream": True,
+        "max_images_per_request": 1,
         "presets": {
             "1K": {"square": "1024x1024"},
             "2K": {
@@ -192,6 +194,7 @@ class RequestHeartbeat:
         timeout_seconds: int,
         *,
         interval_seconds: float = DEFAULT_PROGRESS_INTERVAL_SECONDS,
+        client_request_id: str | None = None,
         stream: Any = None,
     ) -> None:
         if interval_seconds <= 0:
@@ -199,6 +202,7 @@ class RequestHeartbeat:
         self.operation = operation
         self.timeout_seconds = timeout_seconds
         self.interval_seconds = interval_seconds
+        self.client_request_id = client_request_id
         self.stream = stream if stream is not None else sys.stderr
         self._stop = threading.Event()
         self._started = 0.0
@@ -237,6 +241,8 @@ class RequestHeartbeat:
             "remaining_seconds": max(0, self.timeout_seconds - elapsed_seconds),
             "timeout_seconds": self.timeout_seconds,
         }
+        if self.client_request_id:
+            payload["client_request_id"] = self.client_request_id
         print(json.dumps(payload, sort_keys=True), file=self.stream, flush=True)
 
 
@@ -251,6 +257,7 @@ class APIError(SkillError):
         error_type: str | None = None,
         retry_after: str | None = None,
         request_id: str | None = None,
+        client_request_id: str | None = None,
         category_override: str | None = None,
         billing_ambiguous: bool = False,
         transport_kind: str | None = None,
@@ -260,6 +267,7 @@ class APIError(SkillError):
         self.error_type = error_type
         self.retry_after = retry_after
         self.request_id = request_id
+        self.client_request_id = client_request_id
         self.category_override = category_override
         self.billing_ambiguous = billing_ambiguous
         self.transport_kind = transport_kind
@@ -277,6 +285,8 @@ class APIError(SkillError):
             details["retry_after"] = self.retry_after
         if self.request_id:
             details["request_id"] = self.request_id
+        if self.client_request_id:
+            details["client_request_id"] = self.client_request_id
         if self.transport_kind:
             details["transport"] = self.transport_kind
         if self.status == 524:
@@ -290,7 +300,7 @@ class APIError(SkillError):
             details["retry_safe"] = False
             details["action"] = (
                 "The request may have reached the image service. Check Sub2API connectivity, "
-                "the request ID and usage logs before approving another generation request."
+                "the client request ID and usage logs before approving another paid request."
             )
         return {"ok": False, "error": details}
 
@@ -307,6 +317,7 @@ class StreamInterruptedError(APIError):
         category: str = "stream_interrupted",
         error_type: str | None = None,
         transport_kind: str | None = None,
+        client_request_id: str | None = None,
     ) -> None:
         self.headers = dict(headers)
         self.partial_response = dict(partial_response or {"data": []})
@@ -316,6 +327,7 @@ class StreamInterruptedError(APIError):
             message,
             error_type=error_type,
             request_id=_request_id(self.headers),
+            client_request_id=client_request_id,
             category_override=category,
             billing_ambiguous=True,
             transport_kind=transport_kind,
@@ -366,6 +378,7 @@ class Config:
             "timeout_seconds": self.timeout_seconds,
             "provider_profile": self.provider_profile,
             "default_stream": default_stream_for_profile(self.provider_profile),
+            "max_images_per_request": max_images_per_request(self.provider_profile),
         }
         if path is not None:
             result["config_path"] = str(path.resolve())
@@ -415,6 +428,7 @@ class GenerationResult:
     headers: dict[str, str]
     response_mode: str
     stream_done: bool | None = None
+    stream_terminal_event: bool | None = None
     stream_event_count: int = 0
     transport_warning: dict[str, Any] | None = None
 
@@ -487,6 +501,15 @@ def validate_provider_profile(value: str) -> str:
 def default_stream_for_profile(provider_profile: str) -> bool:
     profile = validate_provider_profile(provider_profile)
     return bool(PROVIDER_PROFILES[profile]["default_stream"])
+
+
+def max_images_per_request(provider_profile: str) -> int:
+    profile = validate_provider_profile(provider_profile)
+    return int(PROVIDER_PROFILES[profile]["max_images_per_request"])
+
+
+def new_client_request_id() -> str:
+    return f"img-{uuid.uuid4().hex}"
 
 
 def _positive_int(value: Any, name: str, minimum: int, maximum: int) -> int:
@@ -1081,12 +1104,14 @@ def _transport_api_error(
     *,
     api_key: str,
     headers: Mapping[str, str] | None = None,
+    client_request_id: str | None = None,
     billing_ambiguous: bool = True,
 ) -> APIError:
     category, reason = _transport_details(exc)
     return APIError(
         redact_text(f"Sub2API request failed: {reason}", (api_key,)),
         request_id=_request_id(headers or {}),
+        client_request_id=client_request_id,
         category_override=category,
         billing_ambiguous=billing_ambiguous,
         transport_kind=category,
@@ -1099,6 +1124,11 @@ def _request_id(headers: Mapping[str, str]) -> str | None:
         if value:
             return value
     return None
+
+
+def _client_request_id(headers: Mapping[str, str]) -> str | None:
+    value = headers.get("x-client-request-id")
+    return value if value else None
 
 
 def _error_details(raw: bytes) -> tuple[str, str | None]:
@@ -1130,9 +1160,22 @@ def _parse_json_response(
         raise APIError(
             "Sub2API returned a successful response that was not valid JSON",
             request_id=_request_id(headers),
+            client_request_id=_client_request_id(headers),
         ) from exc
     if not isinstance(payload, dict):
-        raise APIError("Sub2API JSON response must be an object")
+        raise APIError(
+            "Sub2API JSON response must be an object",
+            request_id=_request_id(headers),
+            client_request_id=_client_request_id(headers),
+        )
+    if payload.get("error") is not None:
+        message, error_type = _error_details(raw)
+        raise APIError(
+            message,
+            error_type=error_type,
+            request_id=_request_id(headers),
+            client_request_id=_client_request_id(headers),
+        )
     return payload
 
 
@@ -1146,7 +1189,10 @@ class ImageClient:
         path: str,
         body: bytes,
         content_type: str,
+        *,
+        client_request_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, str]]:
+        selected_client_request_id = client_request_id or new_client_request_id()
         url = f"{self.config.base_url}{path}"
         request = Request(
             url,
@@ -1159,16 +1205,19 @@ class ImageClient:
                 "Content-Type": content_type,
                 "Pragma": "no-cache",
                 "User-Agent": USER_AGENT,
+                "X-Client-Request-Id": selected_client_request_id,
             },
         )
         headers: dict[str, str] = {}
         try:
             with urlopen(request, timeout=self.config.timeout_seconds) as response:
                 headers = {key.lower(): value for key, value in response.headers.items()}
+                headers.setdefault("x-client-request-id", selected_client_request_id)
                 raw = _read_limited(response, MAX_RESPONSE_BYTES)
         except HTTPError as exc:
             raw = _read_limited(exc, MAX_ERROR_BYTES)
             headers = {key.lower(): value for key, value in exc.headers.items()}
+            headers.setdefault("x-client-request-id", selected_client_request_id)
             message, error_type = _error_details(raw)
             raise APIError(
                 redact_text(message, (self.config.api_key,)),
@@ -1176,6 +1225,7 @@ class ImageClient:
                 error_type=error_type,
                 retry_after=headers.get("retry-after"),
                 request_id=_request_id(headers),
+                client_request_id=selected_client_request_id,
             ) from None
         except (
             http.client.IncompleteRead,
@@ -1188,37 +1238,74 @@ class ImageClient:
                 exc,
                 api_key=self.config.api_key,
                 headers=headers,
+                client_request_id=selected_client_request_id,
             ) from None
 
         return _parse_json_response(raw, headers), headers
 
-    def generate(self, payload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    def generate(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        client_request_id: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
-        return self._request("POST", "/images/generations", body, "application/json")
+        return self._request(
+            "POST",
+            "/images/generations",
+            body,
+            "application/json",
+            client_request_id=client_request_id,
+        )
 
-    def generate_stream(self, payload: Mapping[str, Any]) -> GenerationResult:
+    def generate_stream(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        client_request_id: str | None = None,
+    ) -> GenerationResult:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
+        return self._stream_request(
+            "/images/generations",
+            body,
+            "application/json",
+            expected_count=int(payload.get("n", 1)),
+            client_request_id=client_request_id,
+        )
+
+    def _stream_request(
+        self,
+        path: str,
+        body: bytes,
+        content_type: str,
+        *,
+        expected_count: int,
+        client_request_id: str | None = None,
+    ) -> GenerationResult:
+        selected_client_request_id = client_request_id or new_client_request_id()
         request = Request(
-            f"{self.config.base_url}/images/generations",
+            f"{self.config.base_url}{path}",
             data=body,
             method="POST",
             headers={
                 "Accept": "text/event-stream",
                 "Authorization": f"Bearer {self.config.api_key}",
                 "Cache-Control": "no-store",
-                "Content-Type": "application/json",
+                "Content-Type": content_type,
                 "Pragma": "no-cache",
                 "User-Agent": USER_AGENT,
+                "X-Client-Request-Id": selected_client_request_id,
             },
         )
         headers: dict[str, str] = {}
         try:
             with urlopen(request, timeout=self.config.timeout_seconds) as response:
                 headers = {key.lower(): value for key, value in response.headers.items()}
+                headers.setdefault("x-client-request-id", selected_client_request_id)
                 content_type = headers.get("content-type", "").lower()
                 if "text/event-stream" not in content_type:
                     raw = _read_limited(response, MAX_RESPONSE_BYTES)
@@ -1227,10 +1314,16 @@ class ImageClient:
                         headers=headers,
                         response_mode="json",
                     )
-                return self._read_generation_stream(response, headers)
+                return self._read_generation_stream(
+                    response,
+                    headers,
+                    expected_count=expected_count,
+                    client_request_id=selected_client_request_id,
+                )
         except HTTPError as exc:
             raw = _read_limited(exc, MAX_ERROR_BYTES)
             headers = {key.lower(): value for key, value in exc.headers.items()}
+            headers.setdefault("x-client-request-id", selected_client_request_id)
             message, error_type = _error_details(raw)
             raise APIError(
                 redact_text(message, (self.config.api_key,)),
@@ -1238,6 +1331,7 @@ class ImageClient:
                 error_type=error_type,
                 retry_after=headers.get("retry-after"),
                 request_id=_request_id(headers),
+                client_request_id=selected_client_request_id,
             ) from None
         except StreamInterruptedError:
             raise
@@ -1252,12 +1346,16 @@ class ImageClient:
                 exc,
                 api_key=self.config.api_key,
                 headers=headers,
+                client_request_id=selected_client_request_id,
             ) from None
 
     def _read_generation_stream(
         self,
         response: Any,
         headers: Mapping[str, str],
+        *,
+        expected_count: int,
+        client_request_id: str,
     ) -> GenerationResult:
         parser = SSEImageParser()
         failure: BaseException | None = None
@@ -1298,8 +1396,11 @@ class ImageClient:
         if validation_error is not None:
             failure = validation_error
 
-        if failure is None and not state.done:
-            failure = EOFError("SSE stream ended before the [DONE] marker")
+        terminal_event_received = (
+            state.completed_count >= expected_count and len(state.data) >= expected_count
+        )
+        if failure is None and not state.done and not terminal_event_received:
+            failure = EOFError("SSE stream ended before a completed image event")
         if failure is None and not state.data:
             failure = SSEParseError("SSE stream completed without a final image")
 
@@ -1314,13 +1415,14 @@ class ImageClient:
                 OSError,
             ),
         )
-        if failure is not None and state.data and transport_failure:
+        if failure is not None and terminal_event_received and transport_failure:
             category, reason = _transport_details(failure)
             return GenerationResult(
                 response=state.response(),
                 headers=dict(headers),
                 response_mode="sse",
                 stream_done=state.done,
+                stream_terminal_event=terminal_event_received,
                 stream_event_count=state.event_count,
                 transport_warning={
                     "category": category,
@@ -1333,13 +1435,19 @@ class ImageClient:
                 },
             )
         if failure is not None:
-            raise self._stream_interruption(failure, headers, state) from None
+            raise self._stream_interruption(
+                failure,
+                headers,
+                state,
+                client_request_id=client_request_id,
+            ) from None
 
         return GenerationResult(
             response=state.response(),
             headers=dict(headers),
             response_mode="sse",
-            stream_done=True,
+            stream_done=state.done,
+            stream_terminal_event=terminal_event_received,
             stream_event_count=state.event_count,
         )
 
@@ -1360,6 +1468,8 @@ class ImageClient:
         failure: BaseException,
         headers: Mapping[str, str],
         state: ImageStreamState,
+        *,
+        client_request_id: str,
     ) -> StreamInterruptedError:
         error_type: str | None = None
         transport_kind: str | None = None
@@ -1387,28 +1497,56 @@ class ImageClient:
             category=category,
             error_type=error_type,
             transport_kind=transport_kind,
+            client_request_id=client_request_id,
         )
 
     def edit(
         self,
         fields: Mapping[str, str],
         files: Sequence[tuple[str, Path]],
+        *,
+        client_request_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         body, content_type = encode_multipart(fields, files)
-        return self._request("POST", "/images/edits", body, content_type)
+        return self._request(
+            "POST",
+            "/images/edits",
+            body,
+            content_type,
+            client_request_id=client_request_id,
+        )
 
-    def probe_models(self) -> dict[str, Any]:
-        """Check TLS, connectivity and authentication without creating an image."""
-        endpoint = f"{self.config.base_url}/models"
+    def edit_stream(
+        self,
+        fields: Mapping[str, str],
+        files: Sequence[tuple[str, Path]],
+        *,
+        expected_count: int = 1,
+        client_request_id: str | None = None,
+    ) -> GenerationResult:
+        body, content_type = encode_multipart(fields, files)
+        return self._stream_request(
+            "/images/edits",
+            body,
+            content_type,
+            expected_count=expected_count,
+            client_request_id=client_request_id,
+        )
+
+    def probe_health(self) -> dict[str, Any]:
+        """Check the image ingress TLS and health route without creating an image."""
+        parsed = urlsplit(self.config.base_url)
+        endpoint = urlunsplit((parsed.scheme, parsed.netloc, "/health", "", ""))
+        client_request_id = new_client_request_id()
         request = Request(
             endpoint,
             method="GET",
             headers={
                 "Accept": "application/json",
-                "Authorization": f"Bearer {self.config.api_key}",
                 "Cache-Control": "no-store",
                 "Pragma": "no-cache",
                 "User-Agent": USER_AGENT,
+                "X-Client-Request-Id": client_request_id,
             },
         )
         headers: dict[str, str] = {}
@@ -1416,11 +1554,13 @@ class ImageClient:
         try:
             with urlopen(request, timeout=self.config.timeout_seconds) as response:
                 headers = {key.lower(): value for key, value in response.headers.items()}
+                headers.setdefault("x-client-request-id", client_request_id)
                 raw = _read_limited(response, MAX_ERROR_BYTES)
                 status = getattr(response, "status", response.getcode())
         except HTTPError as exc:
             raw = _read_limited(exc, MAX_ERROR_BYTES)
             headers = {key.lower(): value for key, value in exc.headers.items()}
+            headers.setdefault("x-client-request-id", client_request_id)
             message, error_type = _error_details(raw)
             raise APIError(
                 redact_text(message, (self.config.api_key,)),
@@ -1428,6 +1568,7 @@ class ImageClient:
                 error_type=error_type,
                 retry_after=headers.get("retry-after"),
                 request_id=_request_id(headers),
+                client_request_id=client_request_id,
             ) from None
         except (
             http.client.IncompleteRead,
@@ -1440,6 +1581,7 @@ class ImageClient:
                 exc,
                 api_key=self.config.api_key,
                 headers=headers,
+                client_request_id=client_request_id,
                 billing_ambiguous=False,
             ) from None
         result: dict[str, Any] = {
@@ -1451,6 +1593,8 @@ class ImageClient:
             "elapsed_seconds": round(time.monotonic() - started, 3),
             "image_request_sent": False,
             "billing_expected": False,
+            "authentication_checked": False,
+            "client_request_id": client_request_id,
         }
         identifier = _request_id(headers)
         if identifier:
