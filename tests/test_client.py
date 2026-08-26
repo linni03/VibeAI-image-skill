@@ -128,6 +128,8 @@ class MockHandler(BaseHTTPRequestHandler):
             ).encode()
             self.send_response(self.server.state.error_status)
             self.send_header("Content-Type", "application/json")
+            self.send_header("X-Request-ID", self.headers["X-Request-ID"])
+            self.send_header("X-Client-Request-ID", "server-error-test")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
@@ -155,6 +157,7 @@ class MockHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("X-Request-ID", "req-test-123")
+        self.send_header("X-Client-Request-ID", "server-client-test")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -194,6 +197,24 @@ class ConfigTests(unittest.TestCase):
             Config("https://images.example.test/v1", "secret").timeout_seconds,
             600,
         )
+
+    def test_saved_config_marks_current_managed_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            save_config(
+                Config(
+                    "https://images.example.test/v1",
+                    "secret-test-key",
+                    timeout_seconds=180,
+                ),
+                path,
+            )
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            state = read_config_state(path)
+
+        self.assertEqual(stored["schema_version"], 2)
+        self.assertEqual(stored["defaults_version"], image_client.SKILL_VERSION)
+        self.assertEqual(state.defaults_version, image_client.SKILL_VERSION)
 
     def test_platform_default_config_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -726,6 +747,8 @@ class ClientIntegrationTests(unittest.TestCase):
                 headers["x-client-request-id"],
                 report["client_request_id"],
             )
+            self.assertEqual(headers["x-request-id"], report["client_request_id"])
+            self.assertEqual(report["server_client_request_id"], "server-client-test")
             request_payload = json.loads(captured["body"])
             self.assertEqual(request_payload["size"], "1024x1024")
             self.assertEqual(request_payload["response_format"], "b64_json")
@@ -794,6 +817,10 @@ class ClientIntegrationTests(unittest.TestCase):
         sent = request.call_args.args[0]
         self.assertEqual(
             sent.get_header("X-client-request-id"),
+            error["client_request_id"],
+        )
+        self.assertEqual(
+            sent.get_header("X-request-id"),
             error["client_request_id"],
         )
 
@@ -912,6 +939,10 @@ class ClientIntegrationTests(unittest.TestCase):
                 ImageClient(self.config(server)).generate({"prompt": "draw"})
             error = caught.exception.as_dict()["error"]
             self.assertEqual(error["category"], "authentication")
+            self.assertFalse(error["retry_safe"])
+            self.assertIn("Reconfigure", error["action"])
+            self.assertEqual(error["request_id"], error["client_request_id"])
+            self.assertEqual(error["server_client_request_id"], "server-error-test")
             self.assertNotIn("secret-test-key", error["message"])
 
             server.state.error_status = 524

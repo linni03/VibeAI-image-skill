@@ -34,9 +34,12 @@ DEFAULT_BASE_URL = "https://images.vibeai.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_OUTPUT_DIR = "generated_images"
 DEFAULT_TIMEOUT_SECONDS = 600
+LEGACY_DEFAULT_TIMEOUT_SECONDS = 180
 DEFAULT_PROGRESS_INTERVAL_SECONDS = 15
 DEFAULT_PROVIDER_PROFILE = "sub2api-openai-oauth"
-SKILL_VERSION = "1.6.0"
+SKILL_VERSION = "1.7.0"
+CONFIG_SCHEMA_VERSION = 2
+DEFAULT_TIMEOUT_MIGRATION_VERSION = (1, 7, 0)
 LEGACY_CONFIG_PATH = Path("~/.config/sub2api-image/config.json").expanduser()
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_ERROR_BYTES = 1024 * 1024
@@ -258,6 +261,7 @@ class APIError(SkillError):
         retry_after: str | None = None,
         request_id: str | None = None,
         client_request_id: str | None = None,
+        server_client_request_id: str | None = None,
         category_override: str | None = None,
         billing_ambiguous: bool = False,
         transport_kind: str | None = None,
@@ -268,6 +272,7 @@ class APIError(SkillError):
         self.retry_after = retry_after
         self.request_id = request_id
         self.client_request_id = client_request_id
+        self.server_client_request_id = server_client_request_id
         self.category_override = category_override
         self.billing_ambiguous = billing_ambiguous
         self.transport_kind = transport_kind
@@ -287,9 +292,23 @@ class APIError(SkillError):
             details["request_id"] = self.request_id
         if self.client_request_id:
             details["client_request_id"] = self.client_request_id
+        if self.server_client_request_id:
+            details["server_client_request_id"] = self.server_client_request_id
         if self.transport_kind:
             details["transport"] = self.transport_kind
-        if self.status == 524:
+        if self.status == 401:
+            details["retry_safe"] = False
+            details["action"] = (
+                "Reconfigure the skill with a valid Sub2API user API key for this "
+                "image endpoint. Do not retry with the rejected key."
+            )
+        elif self.status == 403:
+            details["retry_safe"] = False
+            details["action"] = (
+                "Use a Sub2API user API key whose group is enabled for image generation. "
+                "Do not retry until the permission is corrected."
+            )
+        elif self.status == 524:
             details["retry_safe"] = False
             details["action"] = (
                 "The paid request outcome is ambiguous. Check the image-only direct base URL, "
@@ -328,6 +347,9 @@ class StreamInterruptedError(APIError):
             error_type=error_type,
             request_id=_request_id(self.headers),
             client_request_id=client_request_id,
+            server_client_request_id=response_client_request_id(
+                self.headers, client_request_id
+            ),
             category_override=category,
             billing_ambiguous=True,
             transport_kind=transport_kind,
@@ -395,6 +417,7 @@ class ConfigState:
     provider_profile: str = DEFAULT_PROVIDER_PROFILE
     credential_protection: str | None = None
     credential_error: CredentialDecryptionError | None = None
+    defaults_version: str | None = None
 
     def with_api_key(self, api_key: str) -> Config:
         return config_from_mapping(
@@ -510,6 +533,33 @@ def max_images_per_request(provider_profile: str) -> int:
 
 def new_client_request_id() -> str:
     return f"img-{uuid.uuid4().hex}"
+
+
+def migrated_timeout_seconds(
+    existing_timeout_seconds: int | None,
+    requested_timeout_seconds: int | None = None,
+    *,
+    defaults_version: str | None = None,
+) -> tuple[int, bool]:
+    """Select an install-time timeout and identify the legacy 180s migration."""
+    if requested_timeout_seconds is not None:
+        return requested_timeout_seconds, False
+    version_numbers = (
+        tuple(int(part) for part in defaults_version.split("."))
+        if defaults_version and re.fullmatch(r"\d+\.\d+\.\d+", defaults_version)
+        else None
+    )
+    if (
+        existing_timeout_seconds == LEGACY_DEFAULT_TIMEOUT_SECONDS
+        and (
+            version_numbers is None
+            or version_numbers < DEFAULT_TIMEOUT_MIGRATION_VERSION
+        )
+    ):
+        return DEFAULT_TIMEOUT_SECONDS, True
+    if existing_timeout_seconds is not None:
+        return existing_timeout_seconds, False
+    return DEFAULT_TIMEOUT_SECONDS, False
 
 
 def _positive_int(value: Any, name: str, minimum: int, maximum: int) -> int:
@@ -686,6 +736,8 @@ def _unprotect_api_key(value: str) -> str:
 
 def _config_payload(config: Config) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "schema_version": CONFIG_SCHEMA_VERSION,
+        "defaults_version": SKILL_VERSION,
         "base_url": config.base_url,
         "model": config.model,
         "output_dir": config.output_dir,
@@ -788,6 +840,11 @@ def read_config_state(
         provider_profile=public_config.provider_profile,
         credential_protection=protection,
         credential_error=credential_error,
+        defaults_version=(
+            str(data["defaults_version"])
+            if isinstance(data.get("defaults_version"), str)
+            else None
+        ),
     )
 
 
@@ -1112,6 +1169,9 @@ def _transport_api_error(
         redact_text(f"Sub2API request failed: {reason}", (api_key,)),
         request_id=_request_id(headers or {}),
         client_request_id=client_request_id,
+        server_client_request_id=response_client_request_id(
+            headers or {}, client_request_id
+        ),
         category_override=category,
         billing_ambiguous=billing_ambiguous,
         transport_kind=category,
@@ -1129,6 +1189,15 @@ def _request_id(headers: Mapping[str, str]) -> str | None:
 def _client_request_id(headers: Mapping[str, str]) -> str | None:
     value = headers.get("x-client-request-id")
     return value if value else None
+
+
+def response_client_request_id(
+    headers: Mapping[str, str], client_request_id: str | None
+) -> str | None:
+    response_id = _client_request_id(headers)
+    if response_id and response_id != client_request_id:
+        return response_id
+    return None
 
 
 def _error_details(raw: bytes) -> tuple[str, str | None]:
@@ -1152,7 +1221,10 @@ def _error_details(raw: bytes) -> tuple[str, str | None]:
 
 
 def _parse_json_response(
-    raw: bytes, headers: Mapping[str, str]
+    raw: bytes,
+    headers: Mapping[str, str],
+    *,
+    client_request_id: str | None = None,
 ) -> dict[str, Any]:
     try:
         payload = json.loads(raw.decode("utf-8"))
@@ -1160,13 +1232,19 @@ def _parse_json_response(
         raise APIError(
             "Sub2API returned a successful response that was not valid JSON",
             request_id=_request_id(headers),
-            client_request_id=_client_request_id(headers),
+            client_request_id=client_request_id or _client_request_id(headers),
+            server_client_request_id=response_client_request_id(
+                headers, client_request_id
+            ),
         ) from exc
     if not isinstance(payload, dict):
         raise APIError(
             "Sub2API JSON response must be an object",
             request_id=_request_id(headers),
-            client_request_id=_client_request_id(headers),
+            client_request_id=client_request_id or _client_request_id(headers),
+            server_client_request_id=response_client_request_id(
+                headers, client_request_id
+            ),
         )
     if payload.get("error") is not None:
         message, error_type = _error_details(raw)
@@ -1174,7 +1252,10 @@ def _parse_json_response(
             message,
             error_type=error_type,
             request_id=_request_id(headers),
-            client_request_id=_client_request_id(headers),
+            client_request_id=client_request_id or _client_request_id(headers),
+            server_client_request_id=response_client_request_id(
+                headers, client_request_id
+            ),
         )
     return payload
 
@@ -1206,6 +1287,7 @@ class ImageClient:
                 "Pragma": "no-cache",
                 "User-Agent": USER_AGENT,
                 "X-Client-Request-Id": selected_client_request_id,
+                "X-Request-ID": selected_client_request_id,
             },
         )
         headers: dict[str, str] = {}
@@ -1226,6 +1308,9 @@ class ImageClient:
                 retry_after=headers.get("retry-after"),
                 request_id=_request_id(headers),
                 client_request_id=selected_client_request_id,
+                server_client_request_id=response_client_request_id(
+                    headers, selected_client_request_id
+                ),
             ) from None
         except (
             http.client.IncompleteRead,
@@ -1241,7 +1326,12 @@ class ImageClient:
                 client_request_id=selected_client_request_id,
             ) from None
 
-        return _parse_json_response(raw, headers), headers
+        return (
+            _parse_json_response(
+                raw, headers, client_request_id=selected_client_request_id
+            ),
+            headers,
+        )
 
     def generate(
         self,
@@ -1299,6 +1389,7 @@ class ImageClient:
                 "Pragma": "no-cache",
                 "User-Agent": USER_AGENT,
                 "X-Client-Request-Id": selected_client_request_id,
+                "X-Request-ID": selected_client_request_id,
             },
         )
         headers: dict[str, str] = {}
@@ -1310,7 +1401,11 @@ class ImageClient:
                 if "text/event-stream" not in content_type:
                     raw = _read_limited(response, MAX_RESPONSE_BYTES)
                     return GenerationResult(
-                        response=_parse_json_response(raw, headers),
+                        response=_parse_json_response(
+                            raw,
+                            headers,
+                            client_request_id=selected_client_request_id,
+                        ),
                         headers=headers,
                         response_mode="json",
                     )
@@ -1332,6 +1427,9 @@ class ImageClient:
                 retry_after=headers.get("retry-after"),
                 request_id=_request_id(headers),
                 client_request_id=selected_client_request_id,
+                server_client_request_id=response_client_request_id(
+                    headers, selected_client_request_id
+                ),
             ) from None
         except StreamInterruptedError:
             raise
@@ -1547,6 +1645,7 @@ class ImageClient:
                 "Pragma": "no-cache",
                 "User-Agent": USER_AGENT,
                 "X-Client-Request-Id": client_request_id,
+                "X-Request-ID": client_request_id,
             },
         )
         headers: dict[str, str] = {}
@@ -1569,6 +1668,9 @@ class ImageClient:
                 retry_after=headers.get("retry-after"),
                 request_id=_request_id(headers),
                 client_request_id=client_request_id,
+                server_client_request_id=response_client_request_id(
+                    headers, client_request_id
+                ),
             ) from None
         except (
             http.client.IncompleteRead,
@@ -1599,6 +1701,9 @@ class ImageClient:
         identifier = _request_id(headers)
         if identifier:
             result["request_id"] = identifier
+        server_client_id = response_client_request_id(headers, client_request_id)
+        if server_client_id:
+            result["server_client_request_id"] = server_client_id
         return result
 
     def result_bytes(self, item: Mapping[str, Any]) -> bytes:

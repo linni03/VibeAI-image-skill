@@ -15,6 +15,7 @@ from typing import Any
 from image_client import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_TIMEOUT_SECONDS,
     default_stream_for_profile,
     ConfigError,
     ImageClient,
@@ -114,6 +115,11 @@ def run_doctor(
             "credential_protection": credential_protection,
             "credential_readable": credential_readable,
         }
+        if config.timeout_seconds < DEFAULT_TIMEOUT_SECONDS:
+            report["configuration"]["warning"] = (
+                f"Configured timeout is {config.timeout_seconds} seconds; paid image "
+                f"workflows should use at least {DEFAULT_TIMEOUT_SECONDS} seconds"
+            )
     except Exception as exc:
         report["configuration"] = {
             "ok": False,

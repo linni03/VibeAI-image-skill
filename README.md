@@ -1,6 +1,6 @@
 # VibeAI Sub2API 图像 Skill
 
-这是一个供 Codex 使用的图像生成与编辑 Skill，默认使用 Sub2API 的 OpenAI OAuth 图像账号桥接。安装并配置一次后，可以直接在 Codex 对话中描述图片需求，不需要手动调用接口或安装第三方 Python 包。当前 Skill 版本为 `1.6.0`。
+这是一个供 Codex 使用的图像生成与编辑 Skill，默认使用 Sub2API 的 OpenAI OAuth 图像账号桥接。安装并配置一次后，可以直接在 Codex 对话中描述图片需求，不需要手动调用接口或安装第三方 Python 包。当前 Skill 版本为 `1.7.0`。
 
 ![VibeAI Sub2API 图像 Skill 安装流程](docs/assets/vibeai-image-skill-tutorial.png)
 
@@ -34,7 +34,7 @@ Windows 原生环境会使用机器作用域 DPAPI 加密 API Key，使 Codex `e
 
 从旧版本更新时，安装器会兼容旧的当前用户 DPAPI 配置，并读取 `%USERPROFILE%\.config\sub2api-image\config.json` 后写入新位置。旧 Key 可解时会自动迁移；确实无法解密时，安装器会保留 Base URL、模型、输出目录和超时设置，并要求输入替换 Key。旧路径文件会暂时保留，确认新版正常后可以手动删除。
 
-已经安装且配置可读时，重新双击 `install.bat` 会直接覆盖更新 Skill 并原样保留配置，不再重复询问 Base URL 或 Key。需要修改配置时运行 `install.bat --reconfigure`。
+已经安装且配置可读时，重新双击 `install.bat` 会先显示现有 Base URL 供确认，再询问 API Key。两项都直接回车会沿用原配置；也可以当场输入新的 Base URL 或 Key。确认后安装器覆盖更新 Skill，并明确显示“更新完成”。旧版默认的 180 秒超时会安全迁移到 600 秒；用户明确设置的其他超时保持不变。
 
 ## macOS、Linux 和 WSL2 安装
 
@@ -48,7 +48,7 @@ sh install.sh
 
 ## 安装器会做什么
 
-安装器自动识别 Windows 原生、WSL、macOS 或 Linux，并显示实际使用的 Python、Codex Home、Skill 路径和配置路径。首次安装、现有密钥不可读或显式使用 `--reconfigure` 时只会询问：
+安装器自动识别 Windows 原生、WSL、macOS 或 Linux，并显示实际使用的 Python、Codex Home、Skill 路径和配置路径。首次安装和后续更新都会依次确认：
 
 ```text
 Sub2API Base URL [https://images.vibeai.tech/v1]:
@@ -60,7 +60,7 @@ Sub2API 生图 API Key（输入可见）:
 - API Key 输入内容会在终端中显示，便于确认输入或粘贴是否成功；请确保周围无人查看终端
 - 新配置和未声明 profile 的旧配置都使用 `sub2api-openai-oauth`；默认使用零预览 SSE
 - 已经配置且旧 Key 可以读取时，可以直接按回车保留现有 Key
-- 重复安装时，如果现有配置可读且没有传入覆盖参数，安装器会自动保留配置并直接升级
+- 重复安装时，Base URL 直接回车沿用方括号中的现有值，API Key 直接回车保留现有密钥；输入新值即可在本次更新中替换
 - 如果提示旧 Key 无法解密，必须输入替换 Key；空回车不会覆盖原配置
 
 Skill 会安装到 `$CODEX_HOME/skills/sub2api-image`；未设置 `CODEX_HOME` 时使用 `~/.codex/skills/sub2api-image`。Windows 配置保存在 `$CODEX_HOME/sub2api-image/config.json`，并受机器作用域 DPAPI 与 Windows ACL 共同保护；macOS、Linux 和 WSL2 配置保存在 `~/.config/sub2api-image/config.json`，权限为 `0600`。
@@ -151,7 +151,7 @@ writable_roots = ['C:\Users\YOUR-NAME\Pictures']
 
 已验证的预设为 `1K` 方形 `1024x1024`、`2K` 横向 `1536x1024`、`2K` 竖向 `1024x1536`。OAuth `1K` 横向/竖向、`2K` 方形和全部 `4K` preset 不会被猜测或静默替换，而会在联网前报错；只有明确知道后端接受某尺寸时才传精确 `--size WIDTHxHEIGHT`。返回文件仍按真实字节尺寸严格核验。
 
-正式生成和编辑固定使用 `--timeout 600`，最多等待 10 分钟。客户端在发送前生成 `client_request_id`，把它写入 `X-Client-Request-Id`，并随 `image_request_started`、后续心跳、成功或错误 JSON 一起报告。即使 TLS 在响应头之前断开，也可以用这个 ID 检索入口和 Sub2API 日志。心跳每 15 秒输出一次；最终 JSON 单独写入标准输出。Codex 必须保留完整的结构化命令结果和原始命令 `session_id`。
+正式生成和编辑固定使用 `--timeout 600`，最多等待 10 分钟。客户端在发送前生成 `client_request_id`，把它同时写入 `X-Client-Request-Id` 和 `X-Request-ID`，并随 `image_request_started`、后续心跳、成功或错误 JSON 一起报告。前者用于入口日志，后者用于 Sub2API 内部请求日志；如果服务端另行生成客户端请求 ID，结果中还会报告 `server_client_request_id`。心跳每 15 秒输出一次；最终 JSON 单独写入标准输出。Codex 必须保留完整的结构化命令结果和原始命令 `session_id`。
 
 Codex 会每 15 秒恢复同一个原始命令会话；`image_request_started`、`image_request_pending`、`still running`、外层 cell 无 JSON 结束、空输出和目标文件暂不存在都只是等待状态。图片提前完成时，客户端会立即保存并输出最终 JSON，不会等待满 10 分钟，也不会发起第二次生图。
 
@@ -172,7 +172,7 @@ git pull
 .\install.bat
 ```
 
-安装器会暂存并校验新版本，然后原子替换 `%CODEX_HOME%\skills\sub2api-image`。旧脚本和残留文件会被清除，Skill 目录之外的现有配置不会被删除。可读配置自动保留；需要改 Base URL 或 Key 时运行 `.\install.bat --reconfigure`。Windows 旧版的 `windows-dpapi-current-user` 配置会在这一步迁移为 `windows-dpapi-local-machine`。
+安装器会先让用户确认 Base URL 和 API Key，再暂存、校验并原子替换 `%CODEX_HOME%\skills\sub2api-image`。两项直接回车会保留现有值，输入新值则立即替换；旧脚本和残留文件会被清除，Skill 目录之外的配置不会被删除。旧版默认 180 秒超时自动迁移为 600 秒，并在结束时显示“更新完成”。Windows 旧版的 `windows-dpapi-current-user` 配置会在这一步迁移为 `windows-dpapi-local-machine`。
 
 macOS、Linux 或 WSL2：
 
@@ -181,7 +181,7 @@ git pull
 sh install.sh
 ```
 
-macOS、Linux 和 WSL2 同样会原子覆盖 Skill 并自动保留可读配置；需要重新配置时运行 `sh install.sh --reconfigure`。更新后请重启 Codex 或新建会话。
+macOS、Linux 和 WSL2 使用相同的两项确认流程：直接回车沿用，输入新值替换；随后原子覆盖 Skill，并在成功后显示“更新完成”。更新后请重启 Codex 或新建会话。
 
 ## 常见问题
 

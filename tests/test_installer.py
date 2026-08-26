@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import stat
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -108,27 +112,121 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(config, existing)
 
-    def test_reusable_config_preserves_existing_values_without_prompt(self) -> None:
+    def test_prompted_update_preserves_key_and_migrates_legacy_timeout(self) -> None:
         existing = installer.ConfigState(
             base_url="https://images.example.test/v1",
             api_key="existing-secret",
             model="existing-model",
             output_dir="existing-output",
-            timeout_seconds=321,
+            timeout_seconds=180,
             provider_profile=installer.DEFAULT_PROVIDER_PROFILE,
         )
 
-        self.assertEqual(
-            installer.reusable_config(existing),
-            installer.Config(
-                base_url=existing.base_url,
-                api_key="existing-secret",
-                model=existing.model,
-                output_dir=existing.output_dir,
-                timeout_seconds=existing.timeout_seconds,
-                provider_profile=existing.provider_profile,
-            ),
+        prompts: list[str] = []
+        config = installer.prompt_config(
+            existing,
+            model="updated-model",
+            input_fn=lambda prompt: prompts.append(prompt) or "",
+            key_input_fn=lambda prompt: prompts.append(prompt) or "",
         )
+
+        self.assertEqual(config.api_key, "existing-secret")
+        self.assertEqual(config.base_url, existing.base_url)
+        self.assertEqual(config.model, "updated-model")
+        self.assertEqual(config.output_dir, existing.output_dir)
+        self.assertEqual(config.timeout_seconds, 600)
+        self.assertIn(existing.base_url, prompts[0])
+        self.assertIn("直接回车保留现有密钥", prompts[1])
+
+        explicitly_configured = installer.ConfigState(
+            base_url=existing.base_url,
+            api_key=existing.api_key,
+            model=existing.model,
+            output_dir=existing.output_dir,
+            timeout_seconds=180,
+            provider_profile=existing.provider_profile,
+            defaults_version=installer.SKILL_VERSION,
+        )
+        self.assertEqual(
+            installer.prompt_config(
+                explicitly_configured,
+                input_fn=lambda _prompt: "",
+                key_input_fn=lambda _prompt: "",
+            ).timeout_seconds,
+            180,
+        )
+
+    def test_prompted_update_can_replace_base_url_and_key(self) -> None:
+        existing = installer.Config(
+            base_url="https://old.example.test/v1",
+            api_key="existing-secret",
+        )
+        config = installer.prompt_config(
+            existing,
+            input_fn=lambda _prompt: "https://new.example.test/v1",
+            key_input_fn=lambda _prompt: "replacement-secret",
+        )
+
+        self.assertEqual(config.base_url, "https://new.example.test/v1")
+        self.assertEqual(config.api_key, "replacement-secret")
+
+    def test_update_completion_message_and_key_preservation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            codex_home = Path(directory) / "codex"
+            config_path = codex_home / "sub2api-image" / "config.json"
+            installer.install_skill(installer.SKILL_SOURCE, codex_home)
+            installer.save_config(
+                installer.Config(
+                    "https://images.example.test/v1",
+                    "existing-secret",
+                    timeout_seconds=180,
+                ),
+                config_path,
+            )
+            legacy_payload = json.loads(config_path.read_text(encoding="utf-8"))
+            legacy_payload.pop("defaults_version", None)
+            legacy_payload.pop("schema_version", None)
+            config_path.write_text(
+                json.dumps(legacy_payload, indent=2) + "\n", encoding="utf-8"
+            )
+            if os.name == "posix":
+                config_path.chmod(0o600)
+            args = SimpleNamespace(
+                base_url=None,
+                codex_home=codex_home,
+                config=config_path,
+                reconfigure=False,
+                model=None,
+                output_dir=None,
+                timeout=None,
+                provider_profile=None,
+            )
+            output = io.StringIO()
+            prompts: list[str] = []
+
+            def press_enter(prompt: str) -> str:
+                prompts.append(prompt)
+                return ""
+
+            with (
+                patch.object(installer, "parse_args", return_value=args),
+                patch.object(installer.sys.stdin, "isatty", return_value=True),
+                patch("builtins.input", side_effect=press_enter),
+                redirect_stdout(output),
+            ):
+                result = installer.main()
+
+            updated = installer.load_config(config_path, apply_env=False)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(updated.api_key, "existing-secret")
+        self.assertEqual(updated.timeout_seconds, 600)
+        self.assertIn("[OK] 更新完成", output.getvalue())
+        self.assertIn("现有 API Key 已保留", output.getvalue())
+        self.assertIn("180 秒迁移为 600 秒", output.getvalue())
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("https://images.example.test/v1", prompts[0])
+        self.assertIn("直接回车保留现有密钥", prompts[1])
 
     def test_prompt_config_requires_replacement_for_unreadable_key(self) -> None:
         failure = CredentialDecryptionError("unreadable")

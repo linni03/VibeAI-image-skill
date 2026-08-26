@@ -16,7 +16,7 @@ Use the bundled standard-library Python clients against the configured Sub2API e
 5. Invoke each paid generation or edit with `--timeout 600`. Do not run a probe or dry run first unless the user explicitly requests no-cost validation or troubleshooting requires it.
 6. Preserve the complete structured command result and original `session_id`. Resume that same session at intervals of up to 15 seconds. Pending output, an absent file, or an outer `cell_id` completing without final client JSON is not a terminal result.
 7. Treat only an explicit client exit with final JSON as terminal. A deadline signal is not proof the underlying request stopped. Never start a replacement invocation while the original command may still be running.
-8. Inspect every saved final image when local image viewing is available. Report absolute paths, requested and actual dimensions, tier, format, server request ID when present, and the always-present `client_request_id`.
+8. Inspect every saved final image when local image viewing is available. Report absolute paths, requested and actual dimensions, tier, format, server request IDs when present, and the always-present local `client_request_id`.
 9. Treat false size, tier, orientation, count, or format matches as failure even if files were saved.
 
 Read [references/transport-and-billing.md](references/transport-and-billing.md) for TLS, EOF, timeout, sequential multi-output, and billing-ambiguity handling. Read [references/sub2api-api.md](references/sub2api-api.md) for the deployed wire contract. Read [references/model-capabilities.md](references/model-capabilities.md) before selecting custom sizes.
@@ -30,6 +30,8 @@ Run the interactive configuration script only when configuration is missing or t
 ```
 
 Never print or place the key in commands, URLs, logs, metadata, filenames, or replies. Dedicated `SUB2API_IMAGE_*` variables may override configuration; never use a generic `OPENAI_API_KEY` or Codex credential.
+
+The installer confirms Base URL and API Key on every install or update. Empty input preserves each readable existing value; a replacement is required only when no key exists or the stored credential cannot be read.
 
 On Windows, configuration is under `%CODEX_HOME%\sub2api-image\config.json`, falling back to `%USERPROFILE%\.codex\sub2api-image\config.json`, with DPAPI protection. On macOS, Linux, and WSL it is under `~/.config/sub2api-image/config.json` with mode `0600`.
 

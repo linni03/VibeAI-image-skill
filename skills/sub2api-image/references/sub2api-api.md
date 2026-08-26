@@ -22,7 +22,7 @@ By default, generation and editing send `stream=true` and `partial_images=0`. Th
 
 Each request sends:
 
-- `X-Client-Request-Id`: generated before the request and preserved in every report.
+- `X-Client-Request-Id` and `X-Request-ID`: the same local ID generated before the request. The second header keeps Sub2API internal request logs searchable even when its image middleware replaces the client-ID response header.
 - `Cache-Control: no-store` and `Pragma: no-cache`.
 - `Accept: text/event-stream` in streaming mode or `application/json` otherwise.
 

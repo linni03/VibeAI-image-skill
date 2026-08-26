@@ -16,9 +16,9 @@ Use this reference when a paid request times out, loses TLS, ends early, returns
 
 ## Correlation
 
-The client creates a UUID-based `client_request_id` before every request and sends it as `X-Client-Request-Id`. Preserve it from heartbeat, success, and error JSON. A server `request_id` may be absent when the connection fails before response headers; the client ID must still be reported.
+The client creates a UUID-based `client_request_id` before every request and sends the same value as both `X-Client-Request-Id` and `X-Request-ID`. Preserve it from heartbeat, success, and error JSON. Sub2API may overwrite its response `X-Client-Request-ID`; when that differs, the client reports it separately as `server_client_request_id`. A server response ID may be absent when the connection fails before response headers; the local client ID must still be reported.
 
-Ask the operator to search Sub2API and ingress logs by `client_request_id`, then compare image usage and charged amount. The client cannot query administrator-only usage records itself.
+Ask the operator to search ingress request headers for the local `client_request_id` and Sub2API internal logs for the same value as `request_id`, then compare image usage and charged amount. Also provide `server_client_request_id` when present. The client cannot query administrator-only usage records itself.
 
 ## User-Facing Failure
 

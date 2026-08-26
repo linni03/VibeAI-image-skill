@@ -31,7 +31,6 @@ from image_client import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PROVIDER_PROFILE,
-    DEFAULT_TIMEOUT_SECONDS,
     LEGACY_CONFIG_PATH,
     SKILL_VERSION,
     Config,
@@ -42,6 +41,7 @@ from image_client import (  # noqa: E402
     default_config_path,
     discover_config_path,
     load_config,
+    migrated_timeout_seconds,
     read_config_state,
     save_config,
 )
@@ -98,7 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reconfigure",
         action="store_true",
-        help="即使已有可读配置，也重新询问 Base URL 和 API Key",
+        help="兼容参数；安装器每次都会确认 Base URL 和 API Key",
     )
     parser.add_argument("--model", help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", help=argparse.SUPPRESS)
@@ -301,14 +301,6 @@ def read_existing_config(path: Path) -> ConfigState | None:
     return read_config_state(expanded)
 
 
-def reusable_config(existing: Config | ConfigState) -> Config:
-    if isinstance(existing, Config):
-        return existing
-    if existing.api_key is None:
-        raise ConfigError("Existing Sub2API API Key is not readable")
-    return existing.with_api_key(existing.api_key)
-
-
 def prompt_config(
     existing: Config | ConfigState | None,
     *,
@@ -342,6 +334,11 @@ def prompt_config(
     else:
         selected_key = ""
 
+    selected_timeout, _ = migrated_timeout_seconds(
+        existing.timeout_seconds if existing else None,
+        timeout_seconds,
+        defaults_version=getattr(existing, "defaults_version", None),
+    )
     return config_from_mapping(
         {
             "base_url": selected_base_url,
@@ -349,9 +346,7 @@ def prompt_config(
             "model": model or (existing.model if existing else DEFAULT_MODEL),
             "output_dir": output_dir
             or (existing.output_dir if existing else DEFAULT_OUTPUT_DIR),
-            "timeout_seconds": timeout_seconds
-            if timeout_seconds is not None
-            else (existing.timeout_seconds if existing else DEFAULT_TIMEOUT_SECONDS),
+            "timeout_seconds": selected_timeout,
             "provider_profile": provider_profile
             or (existing.provider_profile if existing else DEFAULT_PROVIDER_PROFILE),
         }
@@ -393,35 +388,26 @@ def main() -> int:
                 "[WARN] 现有 Windows 密钥无法在当前安全上下文中解密；"
                 "将保留非敏感配置并要求输入替换密钥"
             )
-        has_overrides = any(
-            value is not None
-            for value in (
-                args.base_url,
-                args.model,
-                args.output_dir,
-                args.timeout,
-                args.provider_profile,
-            )
-        )
-        can_reuse = (
+        timeout_migrated = bool(
             existing is not None
-            and existing.api_key is not None
-            and not args.reconfigure
-            and not has_overrides
+            and migrated_timeout_seconds(
+                existing.timeout_seconds,
+                args.timeout,
+                defaults_version=existing.defaults_version,
+            )[1]
         )
-        if can_reuse:
-            config = reusable_config(existing)
-            print("[INFO] 检测到可读的现有配置，本次更新将原样保留。")
-            print("[INFO] 如需修改配置，请重新运行并添加 --reconfigure。")
-        else:
-            config = prompt_config(
-                existing,
-                base_url=args.base_url,
-                model=args.model,
-                output_dir=args.output_dir,
-                timeout_seconds=args.timeout,
-                provider_profile=args.provider_profile,
-            )
+        if existing is not None and existing.api_key is not None:
+            print("[INFO] 已读取现有配置；两项均可直接回车沿用。")
+        config = prompt_config(
+            existing,
+            base_url=args.base_url,
+            model=args.model,
+            output_dir=args.output_dir,
+            timeout_seconds=args.timeout,
+            provider_profile=args.provider_profile,
+            input_fn=input,
+            key_input_fn=input,
+        )
         result = install_skill(
             SKILL_SOURCE,
             codex_home,
@@ -444,8 +430,8 @@ def main() -> int:
             ) from exc
         result = finalize_install(result)
 
-        action = "已更新" if result.updated else "已安装"
-        print(f"\n[OK] Skill {action}：{result.target}")
+        action = "更新完成" if result.updated else "安装完成"
+        print(f"\n[OK] {action}：{result.target}")
         print(f"[OK] Skill 版本：{result.version}")
         print(f"[OK] 配置已保存：{written_config.resolve()}")
         if existing_config_path != config_path and existing_config_path.exists():
@@ -458,6 +444,9 @@ def main() -> int:
         print(f"[OK] Base URL: {config.base_url}")
         print(f"[OK] 模型：{config.model}")
         print(f"[OK] Provider profile: {config.provider_profile}")
+        print(f"[OK] 请求超时：{config.timeout_seconds} 秒")
+        if timeout_migrated:
+            print("[OK] 已将旧版默认超时从 180 秒迁移为 600 秒")
         print(f"[OK] 保护方式：{config_protection()}")
         if (
             existing is not None
@@ -470,7 +459,10 @@ def main() -> int:
             )
         if existing is not None and existing.credential_error is not None:
             print("[OK] 无法解密的旧密钥已由新输入密钥替换")
-        print("[OK] API Key 已受保护保存（输入时在终端中可见）")
+        if existing is not None and existing.api_key == config.api_key:
+            print("[OK] 现有 API Key 已保留并继续受保护保存")
+        else:
+            print("[OK] API Key 已受保护保存（输入时在终端中可见）")
         if result.backup_path is not None:
             print(f"[WARN] 旧安装备份未能清理，保留于：{result.backup_path}")
 

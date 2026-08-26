@@ -46,6 +46,7 @@ from image_client import (
     print_json,
     public_error,
     read_upload,
+    response_client_request_id,
     resolve_size,
     safe_response_metadata,
     save_response_images,
@@ -311,6 +312,9 @@ def edit_image(
     identifier = request_id(headers)
     if identifier:
         report["request_id"] = identifier
+    server_client_id = response_client_request_id(headers, client_request_id)
+    if server_client_id:
+        report["server_client_request_id"] = server_client_id
     response_metadata = safe_response_metadata(response)
     if response_metadata:
         report["api_metadata"] = response_metadata

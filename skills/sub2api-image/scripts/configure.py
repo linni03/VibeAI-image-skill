@@ -24,6 +24,7 @@ from image_client import (
     config_from_mapping,
     discover_config_path,
     load_config,
+    migrated_timeout_seconds,
     print_json,
     public_error,
     read_config_state,
@@ -113,6 +114,11 @@ def configure(
     else:
         api_key = ""
 
+    selected_timeout, timeout_migrated = migrated_timeout_seconds(
+        existing.timeout_seconds if existing else None,
+        args.timeout,
+        defaults_version=existing.defaults_version if existing else None,
+    )
     mapping = {
         "base_url": args.base_url
         or (existing.base_url if existing else DEFAULT_BASE_URL),
@@ -120,9 +126,7 @@ def configure(
         "model": args.model or (existing.model if existing else DEFAULT_MODEL),
         "output_dir": args.output_dir
         or (existing.output_dir if existing else DEFAULT_OUTPUT_DIR),
-        "timeout_seconds": args.timeout
-        if args.timeout is not None
-        else (existing.timeout_seconds if existing else DEFAULT_TIMEOUT_SECONDS),
+        "timeout_seconds": selected_timeout,
         "provider_profile": getattr(args, "provider_profile", None)
         or (existing.provider_profile if existing else DEFAULT_PROVIDER_PROFILE),
     }
@@ -140,6 +144,9 @@ def configure(
         )
     if existing is not None and existing.credential_error is not None:
         result["credential_replaced"] = True
+    if timeout_migrated:
+        result["timeout_migrated_from"] = 180
+        result["timeout_migrated_to"] = DEFAULT_TIMEOUT_SECONDS
     if existing_path != path and existing_path.exists():
         result["migrated_from"] = str(existing_path.resolve())
         result["legacy_config_retained"] = True

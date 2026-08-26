@@ -52,6 +52,7 @@ class FakeResponse:
         self.headers = {
             "Content-Type": content_type,
             "X-Request-ID": "req-stream-test",
+            "X-Client-Request-ID": "server-stream-test",
         }
         self.status = 200
         self._actions = list(actions)
@@ -160,6 +161,11 @@ class StreamingGenerationTests(unittest.TestCase):
             request.call_args.args[0].get_header("X-client-request-id"),
             report["client_request_id"],
         )
+        self.assertEqual(
+            request.call_args.args[0].get_header("X-request-id"),
+            report["client_request_id"],
+        )
+        self.assertEqual(report["server_client_request_id"], "server-stream-test")
         self.assertIn(
             "text/event-stream", request.call_args.args[0].get_header("Accept")
         )

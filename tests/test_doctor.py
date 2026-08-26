@@ -100,6 +100,10 @@ class DoctorTests(unittest.TestCase):
             sent.get_header("X-client-request-id"),
             report["network"]["client_request_id"],
         )
+        self.assertEqual(
+            sent.get_header("X-request-id"),
+            report["network"]["client_request_id"],
+        )
         self.assertEqual(request.call_count, 1)
 
     def test_missing_config_prevents_network_probe(self) -> None:
