@@ -2,7 +2,7 @@
 
 ## Known Behavior
 
-Sub2API routes OpenAI OAuth image accounts through a Responses image-generation bridge. This skill defaults to the conservative `sub2api-openai-oauth` profile and `gpt-image-2`. Do not infer image options from a Sub2API version string or a model listing; only verified request and returned-byte behavior belongs in this profile.
+Sub2API routes OpenAI OAuth image accounts through a Responses image-generation bridge. This skill defaults to the conservative `sub2api-openai-oauth` profile and `gpt-image-2.5-flare`. Do not infer image options from a Sub2API version string or a model listing; only verified request and returned-byte behavior belongs in this profile.
 
 Keep these facts separate:
 

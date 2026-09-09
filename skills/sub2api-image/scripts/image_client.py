@@ -31,7 +31,7 @@ from image_stream import ImageStreamState, SSEEventError, SSEImageParser, SSEPar
 
 
 DEFAULT_BASE_URL = "https://images.vibeai.tech/v1"
-DEFAULT_MODEL = "gpt-image-2"
+DEFAULT_MODEL = "gpt-image-2.5-flare"
 DEFAULT_OUTPUT_DIR = "generated_images"
 DEFAULT_TIMEOUT_SECONDS = 600
 LEGACY_DEFAULT_TIMEOUT_SECONDS = 180
