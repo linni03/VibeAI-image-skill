@@ -41,7 +41,7 @@ On Windows, configuration is under `%CODEX_HOME%\sub2api-image\config.json`, fal
 <python> <skill-dir>/scripts/generate.py --prompt "A quiet city at dawn" --tier 1K --orientation square --output ./city.png --n 1 --timeout 600
 ```
 
-The OAuth profile defaults to SSE with `partial_images=0`. This supplies transport keepalives and completed events without purchasing preview images. A JSON response to the same request is accepted without resending. Use `--no-stream` only when explicitly required for diagnosis or compatibility, never as a retry strategy.
+Generation under the OAuth profile defaults to SSE with `partial_images=0`. This supplies transport keepalives and completed events without purchasing preview images. A JSON response to the same request is accepted without resending. For generation, use `--no-stream` only when explicitly required for diagnosis or compatibility, never as a retry strategy.
 
 Verified presets are `1024x1024` (1K square), `1536x1024` (2K landscape), and `1024x1536` (2K portrait). Unsupported presets fail locally. Exact `--size WIDTHxHEIGHT` bypasses only the preset allow-list and must still pass legal-size and returned-byte validation.
 
@@ -53,7 +53,9 @@ Use `--prompt-file` for long prompts, `--pictures` for the native Pictures folde
 <python> <skill-dir>/scripts/edit.py --image <absolute-source-path> --prompt "Replace the background with a snowy mountain" --n 1 --timeout 600
 ```
 
-Editing uses the same default SSE, request tracing, terminal-event, timeout, and retry rules. Repeat `--image` for references and add one `--mask` when supplied. The mask dimensions must match the first input. Use local PNG, JPEG, or WebP files and never silently resize them.
+Editing under the OAuth profile defaults to a single JSON response, omitting `stream` and `partial_images`. This avoids observed native OAuth streaming-edit failures while preserving the edit endpoint and reference images. No stream flag is needed; `--no-stream` explicitly selects the same behavior. Use `--stream` only when explicitly requested for diagnosis or a verified compatible upstream, never as an automatic retry. A complete JSON response with validated images is the success boundary; local progress heartbeats are not completion or network keepalives. Request tracing, timeout, and no-automatic-retry rules still apply.
+
+Repeat `--image` for references and add one `--mask` when supplied. The mask dimensions must match the first input. Use local PNG, JPEG, or WebP files and never silently resize them.
 
 ## Validate Installation
 

@@ -18,7 +18,7 @@ Generation sends `model`, `prompt`, `size`, `n=1`, `response_format=b64_json`, a
 
 The `sub2api-openai-oauth` profile rejects `n>1` locally. Multiple requested files are separate, sequential, authorized paid requests; they are not one Images API request.
 
-By default, generation and editing send `stream=true` and `partial_images=0`. This uses the bridge's SSE keepalive and completion path without buying preview frames. `--no-stream` omits both fields and requests one JSON response. A JSON response to a streaming request is accepted without a second request.
+By default, generation sends `stream=true` and `partial_images=0`, using SSE keepalives and completion events without buying preview frames. Editing defaults to JSON and omits both fields for native OAuth compatibility. `--no-stream` explicitly requests JSON; `--stream` explicitly requests SSE with zero previews. A JSON response to a streaming request is accepted by the client without a second request, though the gateway must also support this response format. Changing modes is not an automatic retry strategy.
 
 Each request sends:
 

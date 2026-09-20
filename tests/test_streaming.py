@@ -281,6 +281,42 @@ class StreamingGenerationTests(unittest.TestCase):
         self.assertFalse(report["stream"]["done_marker_received"])
         self.assertNotIn("transport_warning", report)
 
+    def test_edit_defaults_to_json_preserving_references_and_mask(self) -> None:
+        for stream_options in ({}, {"stream": False}):
+            with self.subTest(stream_options=stream_options), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                sources = [root / "first.png", root / "second.png"]
+                mask = root / "mask.png"
+                for path in [*sources, mask]:
+                    path.write_bytes(make_png())
+                payload = json.dumps({"data": [{"b64_json": self.encoded}]}).encode()
+                response = FakeResponse("application/json", [payload])
+                output = root / "edited.png"
+                with patch("image_client.urlopen", return_value=response) as request:
+                    report = edit_image(
+                        self.config,
+                        image_path=sources,
+                        mask_path=mask,
+                        prompt="preserve both references",
+                        output_path=output,
+                        **stream_options,
+                    )
+
+                self.assertTrue(report["ok"])
+                self.assertEqual(output.read_bytes(), make_png())
+                self.assertFalse(report["stream_requested"])
+                self.assertEqual(report["response_mode"], "json")
+                self.assertEqual(request.call_count, 1)
+                sent = request.call_args.args[0]
+                self.assertTrue(sent.full_url.endswith("/images/edits"))
+                self.assertEqual(sent.get_header("Accept"), "application/json")
+                self.assertNotIn(b'name="stream"', sent.data)
+                self.assertNotIn(b'name="partial_images"', sent.data)
+                self.assertEqual(sent.data.count(b'name="image";'), 2)
+                self.assertIn(b'name="mask";', sent.data)
+                self.assertIn(b"preserve both references", sent.data)
+                self.assertIn(b"1024x1024", sent.data)
+
     def test_edit_stream_accepts_edit_completed_without_done_marker(self) -> None:
         response = FakeResponse(
             "text/event-stream",

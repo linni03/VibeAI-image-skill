@@ -2,7 +2,7 @@
 
 ## Known Behavior
 
-Sub2API routes OpenAI OAuth image accounts through a Responses image-generation bridge. This skill defaults to the conservative `sub2api-openai-oauth` profile and `gpt-image-2.5-flare`. Do not infer image options from a Sub2API version string or a model listing; only verified request and returned-byte behavior belongs in this profile.
+Sub2API can route OpenAI OAuth image accounts through native Images endpoints or a Responses image-generation bridge, depending on deployment and model. This skill defaults to the conservative `sub2api-openai-oauth` profile and `gpt-image-2.5-flare`. Do not infer image options from a Sub2API version string or a model listing; only verified request and returned-byte behavior belongs in this profile.
 
 Keep these facts separate:
 
@@ -35,7 +35,7 @@ Unsupported presets fail locally before network activity. They are not silently 
 
 ## Output Count
 
-The OAuth profile permits exactly one output per paid request. Although the OpenAI Images API supports `n`, Sub2API's OAuth path bridges through a Responses image tool whose multi-output contract is not verified. The client therefore rejects `n>1` before network activity.
+The OAuth profile permits exactly one output per paid request. Although the OpenAI Images API supports `n`, multi-output behavior across Sub2API's OAuth native and Responses routes is not verified. The client therefore rejects `n>1` before network activity.
 
 For multiple files, use separate sequential requests only when the user clearly requested that many outputs. Stop the sequence after any failure or ambiguous billing result. Multiple concepts inside one requested composition do not increase the output count.
 

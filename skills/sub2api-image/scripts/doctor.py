@@ -111,6 +111,7 @@ def run_doctor(
             "timeout_seconds": config.timeout_seconds,
             "provider_profile": config.provider_profile,
             "default_stream": default_stream_for_profile(config.provider_profile),
+            "default_edit_stream": default_stream_for_profile(config.provider_profile, operation="edit"),
             "max_images_per_request": max_images_per_request(config.provider_profile),
             "credential_protection": credential_protection,
             "credential_readable": credential_readable,

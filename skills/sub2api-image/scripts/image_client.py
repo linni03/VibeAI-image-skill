@@ -37,7 +37,7 @@ DEFAULT_TIMEOUT_SECONDS = 600
 LEGACY_DEFAULT_TIMEOUT_SECONDS = 180
 DEFAULT_PROGRESS_INTERVAL_SECONDS = 15
 DEFAULT_PROVIDER_PROFILE = "sub2api-openai-oauth"
-SKILL_VERSION = "1.7.0"
+SKILL_VERSION = "1.7.1"
 CONFIG_SCHEMA_VERSION = 2
 DEFAULT_TIMEOUT_MIGRATION_VERSION = (1, 7, 0)
 LEGACY_CONFIG_PATH = Path("~/.config/sub2api-image/config.json").expanduser()
@@ -113,6 +113,7 @@ DEFAULT_CONFIG_PATH = default_config_path()
 PROVIDER_PROFILES = {
     DEFAULT_PROVIDER_PROFILE: {
         "default_stream": True,
+        "default_edit_stream": False,
         "max_images_per_request": 1,
         "presets": {
             "1K": {"square": "1024x1024"},
@@ -400,6 +401,7 @@ class Config:
             "timeout_seconds": self.timeout_seconds,
             "provider_profile": self.provider_profile,
             "default_stream": default_stream_for_profile(self.provider_profile),
+            "default_edit_stream": default_stream_for_profile(self.provider_profile, operation="edit"),
             "max_images_per_request": max_images_per_request(self.provider_profile),
         }
         if path is not None:
@@ -521,9 +523,12 @@ def validate_provider_profile(value: str) -> str:
     return profile
 
 
-def default_stream_for_profile(provider_profile: str) -> bool:
+def default_stream_for_profile(provider_profile: str, *, operation: str = "generate") -> bool:
     profile = validate_provider_profile(provider_profile)
-    return bool(PROVIDER_PROFILES[profile]["default_stream"])
+    if operation not in ("generate", "edit"):
+        raise ConfigError("Operation must be generate or edit")
+    key = "default_edit_stream" if operation == "edit" else "default_stream"
+    return bool(PROVIDER_PROFILES[profile][key])
 
 
 def max_images_per_request(provider_profile: str) -> int:

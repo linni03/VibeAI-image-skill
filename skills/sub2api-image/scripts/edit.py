@@ -113,7 +113,8 @@ def edit_image(
     _, requested_orientation = requested_shape(requested_size)
     selected_config = request_config(config, timeout_seconds)
     selected_stream = (
-        default_stream_for_profile(config.provider_profile) if stream is None else stream
+        default_stream_for_profile(config.provider_profile, operation="edit")
+        if stream is None else stream
     )
 
     if output_path is not None and output_dir is not None:
@@ -379,8 +380,14 @@ def parse_args() -> argparse.Namespace:
         help="Per-request socket timeout in seconds (skill workflow: 600)",
     )
     stream_mode = parser.add_mutually_exclusive_group()
-    stream_mode.add_argument("--stream", dest="stream", action="store_true")
-    stream_mode.add_argument("--no-stream", dest="stream", action="store_false")
+    stream_mode.add_argument(
+        "--stream", dest="stream", action="store_true",
+        help="Explicitly request SSE editing on a compatible upstream",
+    )
+    stream_mode.add_argument(
+        "--no-stream", dest="stream", action="store_false",
+        help="Request a JSON response (OAuth editing default)",
+    )
     parser.set_defaults(stream=None)
     parser.add_argument("--dry-run", action="store_true", help="Validate without network or file writes")
     parser.add_argument(

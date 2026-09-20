@@ -1,6 +1,6 @@
 # VibeAI Sub2API 图像 Skill
 
-这是一个供 Codex 使用的图像生成与编辑 Skill，默认使用 Sub2API 的 OpenAI OAuth 图像账号桥接。安装并配置一次后，可以直接在 Codex 对话中描述图片需求，不需要手动调用接口或安装第三方 Python 包。当前 Skill 版本为 `1.7.0`。
+这是一个供 Codex 使用的图像生成与编辑 Skill，默认使用 Sub2API 的 OpenAI OAuth 图像账号桥接。安装并配置一次后，可以直接在 Codex 对话中描述图片需求，不需要手动调用接口或安装第三方 Python 包。当前 Skill 版本为 `1.7.1`。
 
 ![VibeAI Sub2API 图像 Skill 安装流程](docs/assets/vibeai-image-skill-tutorial.png)
 
@@ -58,7 +58,7 @@ Sub2API 生图 API Key（输入可见）:
 - 使用默认 Base URL：直接按回车
 - 使用其他 Sub2API 地址：输入地址后按回车
 - API Key 输入内容会在终端中显示，便于确认输入或粘贴是否成功；请确保周围无人查看终端
-- 新配置和未声明 profile 的旧配置都使用 `sub2api-openai-oauth`；默认使用零预览 SSE
+- 新配置和未声明 profile 的旧配置都使用 `sub2api-openai-oauth`；生成默认使用零预览 SSE，编辑默认使用非流式 JSON
 - 已经配置且旧 Key 可以读取时，可以直接按回车保留现有 Key
 - 重复安装时，Base URL 直接回车沿用方括号中的现有值，API Key 直接回车保留现有密钥；输入新值即可在本次更新中替换
 - 如果提示旧 Key 无法解密，必须输入替换 Key；空回车不会覆盖原配置
@@ -147,7 +147,7 @@ writable_roots = ['C:\Users\YOUR-NAME\Pictures']
 
 `sub2api-openai-oauth` profile 每个付费请求只允许一张输出，客户端会在联网前拒绝 `n>1`。明确要求多个文件时，Codex 会按顺序执行多个独立的 `n=1` 请求；某一步失败或计费不明确后不会继续剩余请求。“一张图里包含两个类别”和“两个类别各生成一张”是不同需求，含义不清时会先询问。
 
-该 profile 默认使用 SSE，发送 `stream=true` 和 `partial_images=0`。这样可以利用入口 keepalive 和最终完成事件，但不会购买额外预览图。Sub2API 返回 `image_generation.completed` 或 `image_edit.completed` 后即视为终态，不要求额外 `[DONE]`。若同一请求返回普通 JSON，客户端会直接处理，不会重发。
+该 profile 的生成请求默认使用 SSE，发送 `stream=true` 和 `partial_images=0`，利用入口 keepalive 和最终完成事件，不请求额外预览图。编辑请求默认使用非流式 JSON，省略这两个字段，以兼容已验证的原生 OAuth 编辑链路；仍支持多参考图和 mask，不需要额外传入 `--no-stream`。JSON 模式收到完整响应并通过图片校验后才算成功。SSE 模式收到 `image_generation.completed` 或 `image_edit.completed` 后即视为终态，不要求额外 `[DONE]`；若网关将普通 JSON 返回给客户端，也会直接处理，不会重发。
 
 已验证的预设为 `1K` 方形 `1024x1024`、`2K` 横向 `1536x1024`、`2K` 竖向 `1024x1536`。OAuth `1K` 横向/竖向、`2K` 方形和全部 `4K` preset 不会被猜测或静默替换，而会在联网前报错；只有明确知道后端接受某尺寸时才传精确 `--size WIDTHxHEIGHT`。返回文件仍按真实字节尺寸严格核验。
 
@@ -157,7 +157,7 @@ Codex 会每 15 秒恢复同一个原始命令会话；`image_request_started`�
 
 满 600 秒仍未完成时，心跳会改为 `image_request_deadline_reached`。它只表示调用方截止时间已到，不证明底层网络请求已经退出。Codex 会停止同一个原始命令会话并做最后一次文件检查；因为请求可能已经到达服务端，计费结果仍可能不确定，必须先按 `client_request_id` 核对使用记录。
 
-`--stream` 可显式固定默认 SSE 模式，`--no-stream` 可在兼容性诊断中请求单个 JSON 响应。两者都不是 TLS 或网络故障后的重试机制。
+`--stream` 显式启用 SSE；编辑时仅在明确诊断或已验证上游兼容的情况下使用。`--no-stream` 显式启用 JSON（编辑默认值）。两者都不是 TLS 或网络故障后的重试机制。每 15 秒的本地心跳只报告等待状态，不代表网络保活或图片已经完成。
 
 如果连接在 `image_generation.completed` 或 `image_edit.completed` 之后中断，已验证的最终图片会正常保存，并在 JSON 报告中附带 `transport_warning`。如果连接在最终事件之前中断，仅会原子保存文件名含 `partial` 的有效预览，并以失败退出；这些文件会明确标记为诊断预览，不能当作最终图片。此时计费状态可能不确定，客户端不会自动重试。
 

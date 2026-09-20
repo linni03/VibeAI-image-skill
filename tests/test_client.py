@@ -653,6 +653,7 @@ class ConfigTests(unittest.TestCase):
             config = load_config(config_path, apply_env=False)
         self.assertEqual(config.provider_profile, "sub2api-openai-oauth")
         self.assertTrue(config.public_dict()["default_stream"])
+        self.assertFalse(config.public_dict()["default_edit_stream"])
 
 
 class SizeAndFormatTests(unittest.TestCase):

@@ -9,7 +9,8 @@ Use this reference when a paid request times out, loses TLS, ends early, returns
 | Local validation failed before `image_request_started` | none | not submitted | Correct the request; this is not a retry |
 | HTTP error with a final server response | normally none | use the returned error and operator records | Do not retry automatically |
 | Validated `image_generation.completed` or `image_edit.completed` received | final image saved | completed result | Report success; a later transport warning does not invalidate the file |
-| TLS, EOF, reset, 524, or timeout before a completed event | no final image; optional partial diagnostics | ambiguous | Stop and report the correlation IDs |
+| Complete JSON response with validated final images received | final image saved | completed result | Report success after count, size, and format checks |
+| TLS, EOF, reset, 524, or timeout before a completed event or complete JSON result | no final image; optional partial diagnostics | ambiguous | Stop and report the correlation IDs |
 | Returned file fails size, count, or format verification | keep the file for diagnosis | request completed but contract failed | Report mismatch; do not retry automatically |
 
 `image_request_started` proves only that the client began the network call. A local timeout or missing file does not prove that Sub2API or the upstream stopped processing.
@@ -46,4 +47,4 @@ A request for one composition containing multiple subjects or categories remains
 
 ## Partial Images
 
-The default stream sends `partial_images=0`; SSE comments and lifecycle events provide transport activity without purchasing previews. If a future client exposes paid previews, they must be explicitly requested. Partial frames are diagnostic artifacts and never satisfy an output count.
+Generation defaults to streaming; editing defaults to JSON for native OAuth compatibility. When streaming is used, the client sends `partial_images=0`; SSE comments and lifecycle events provide transport activity without purchasing previews. Local progress heartbeats do not keep the network connection alive. If a future client exposes paid previews, they must be explicitly requested. Partial frames are diagnostic artifacts and never satisfy an output count.

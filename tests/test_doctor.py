@@ -62,6 +62,7 @@ class DoctorTests(unittest.TestCase):
             "sub2api-openai-oauth",
         )
         self.assertTrue(report["configuration"]["default_stream"])
+        self.assertFalse(report["configuration"]["default_edit_stream"])
         self.assertEqual(report["configuration"]["max_images_per_request"], 1)
         self.assertTrue(report["output"]["parent_writable"])
         self.assertFalse(report["output"]["write_test_performed"])
