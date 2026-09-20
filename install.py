@@ -343,7 +343,8 @@ def prompt_config(
         {
             "base_url": selected_base_url,
             "api_key": selected_key,
-            "model": model or (existing.model if existing else DEFAULT_MODEL),
+            # Installation refreshes the model even when credentials are reused.
+            "model": model or DEFAULT_MODEL,
             "output_dir": output_dir
             or (existing.output_dir if existing else DEFAULT_OUTPUT_DIR),
             "timeout_seconds": selected_timeout,
@@ -386,7 +387,7 @@ def main() -> int:
         if existing is not None and existing.credential_error is not None:
             print(
                 "[WARN] 现有 Windows 密钥无法在当前安全上下文中解密；"
-                "将保留非敏感配置并要求输入替换密钥"
+                "将保留 Base URL、输出目录和超时设置，更新模型并要求输入替换密钥"
             )
         timeout_migrated = bool(
             existing is not None
@@ -398,6 +399,7 @@ def main() -> int:
         )
         if existing is not None and existing.api_key is not None:
             print("[INFO] 已读取现有配置；两项均可直接回车沿用。")
+        print(f"[INFO] 本次安装将模型配置更新为：{args.model or DEFAULT_MODEL}")
         config = prompt_config(
             existing,
             base_url=args.base_url,
@@ -443,6 +445,8 @@ def main() -> int:
             print("[OK] API Key 保护：配置文件权限 0600")
         print(f"[OK] Base URL: {config.base_url}")
         print(f"[OK] 模型：{config.model}")
+        if existing is not None and existing.model != config.model:
+            print(f"[OK] 模型配置已更新：{existing.model} -> {config.model}")
         print(f"[OK] Provider profile: {config.provider_profile}")
         print(f"[OK] 请求超时：{config.timeout_seconds} 秒")
         if timeout_migrated:

@@ -32,9 +32,9 @@ cd vibeai-image-skill
 
 Windows 原生环境会使用机器作用域 DPAPI 加密 API Key，使 Codex `elevated` 沙箱使用的专用低权限用户也能解密。配置保存在 `%CODEX_HOME%\sub2api-image\config.json`；未设置 `CODEX_HOME` 时使用 `%USERPROFILE%\.codex\sub2api-image\config.json`。配置文件中不会保存明文 Key，机密性同时依赖用户目录的 Windows ACL；不要把配置复制到共享目录。
 
-从旧版本更新时，安装器会兼容旧的当前用户 DPAPI 配置，并读取 `%USERPROFILE%\.config\sub2api-image\config.json` 后写入新位置。旧 Key 可解时会自动迁移；确实无法解密时，安装器会保留 Base URL、模型、输出目录和超时设置，并要求输入替换 Key。旧路径文件会暂时保留，确认新版正常后可以手动删除。
+从旧版本更新时，安装器会兼容旧的当前用户 DPAPI 配置，并读取 `%USERPROFILE%\.config\sub2api-image\config.json` 后写入新位置。旧 Key 可解时会自动迁移；确实无法解密时，安装器会保留 Base URL、输出目录和超时设置，将模型更新为当前版本默认值，并要求输入替换 Key。旧路径文件会暂时保留，确认新版正常后可以手动删除。
 
-已经安装且配置可读时，重新双击 `install.bat` 会先显示现有 Base URL 供确认，再询问 API Key。两项都直接回车会沿用原配置；也可以当场输入新的 Base URL 或 Key。确认后安装器覆盖更新 Skill，并明确显示“更新完成”。旧版默认的 180 秒超时会安全迁移到 600 秒；用户明确设置的其他超时保持不变。
+已经安装且配置可读时，重新双击 `install.bat` 会先显示现有 Base URL 供确认，再询问 API Key。两项都直接回车会沿用现有 Base URL 和 API Key，模型配置仍会更新为当前版本默认值；也可以当场输入新的 Base URL 或 Key。确认后安装器覆盖更新 Skill，并明确显示“更新完成”。旧版默认的 180 秒超时会安全迁移到 600 秒；用户明确设置的其他超时保持不变。
 
 ## macOS、Linux 和 WSL2 安装
 
@@ -172,7 +172,7 @@ git pull
 .\install.bat
 ```
 
-安装器会先让用户确认 Base URL 和 API Key，再暂存、校验并原子替换 `%CODEX_HOME%\skills\sub2api-image`。两项直接回车会保留现有值，输入新值则立即替换；旧脚本和残留文件会被清除，Skill 目录之外的配置不会被删除。旧版默认 180 秒超时自动迁移为 600 秒，并在结束时显示“更新完成”。Windows 旧版的 `windows-dpapi-current-user` 配置会在这一步迁移为 `windows-dpapi-local-machine`。
+安装器会先让用户确认 Base URL 和 API Key，再暂存、校验并原子替换 `%CODEX_HOME%\skills\sub2api-image`。两项直接回车会保留现有值，输入新值则立即替换；旧脚本和残留文件会被清除，Skill 目录之外的配置不会被删除，但配置文件中的 `model` 每次都会同步为当前版本默认模型（当前为 `gpt-image-2.5-flare`），即使之前保存的是自定义模型。若要在本次安装中指定其他模型，可传入 `--model 模型名`。输出目录和 Provider profile 保留现有设置。旧版默认 180 秒超时自动迁移为 600 秒，并在结束时显示“更新完成”。Windows 旧版的 `windows-dpapi-current-user` 配置会在这一步迁移为 `windows-dpapi-local-machine`。
 
 macOS、Linux 或 WSL2：
 
@@ -181,7 +181,7 @@ git pull
 sh install.sh
 ```
 
-macOS、Linux 和 WSL2 使用相同的两项确认流程：直接回车沿用，输入新值替换；随后原子覆盖 Skill，并在成功后显示“更新完成”。更新后请重启 Codex 或新建会话。
+macOS、Linux 和 WSL2 使用相同的两项确认流程：直接回车沿用，输入新值替换；随后原子覆盖 Skill，并同步更新配置文件中的默认模型，成功后显示“更新完成”和模型变更。更新后请重启 Codex 或新建会话。
 
 ## 常见问题
 

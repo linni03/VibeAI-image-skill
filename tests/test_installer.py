@@ -96,7 +96,7 @@ class InstallerTests(unittest.TestCase):
                 )
             self.assertNotIn("sk-image-test", config.public_dict()["api_key"])
 
-    def test_prompt_config_preserves_existing_values_on_enter(self) -> None:
+    def test_prompt_config_refreshes_model_and_preserves_user_settings_on_enter(self) -> None:
         existing = installer.Config(
             base_url="https://images.example.test/v1",
             api_key="existing-secret",
@@ -110,7 +110,12 @@ class InstallerTests(unittest.TestCase):
             input_fn=lambda _prompt: "",
             key_input_fn=lambda _prompt: "",
         )
-        self.assertEqual(config, existing)
+        self.assertEqual(config.model, installer.DEFAULT_MODEL)
+        self.assertEqual(config.base_url, existing.base_url)
+        self.assertEqual(config.api_key, existing.api_key)
+        self.assertEqual(config.output_dir, existing.output_dir)
+        self.assertEqual(config.timeout_seconds, existing.timeout_seconds)
+        self.assertEqual(config.provider_profile, existing.provider_profile)
 
     def test_prompted_update_preserves_key_and_migrates_legacy_timeout(self) -> None:
         existing = installer.ConfigState(
@@ -179,6 +184,7 @@ class InstallerTests(unittest.TestCase):
                 installer.Config(
                     "https://images.example.test/v1",
                     "existing-secret",
+                    model="gpt-image-2",
                     timeout_seconds=180,
                 ),
                 config_path,
@@ -220,13 +226,59 @@ class InstallerTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(updated.api_key, "existing-secret")
+        self.assertEqual(updated.model, installer.DEFAULT_MODEL)
         self.assertEqual(updated.timeout_seconds, 600)
         self.assertIn("[OK] 更新完成", output.getvalue())
         self.assertIn("现有 API Key 已保留", output.getvalue())
+        self.assertIn(
+            f"模型配置已更新：gpt-image-2 -> {installer.DEFAULT_MODEL}",
+            output.getvalue(),
+        )
         self.assertIn("180 秒迁移为 600 秒", output.getvalue())
         self.assertEqual(len(prompts), 2)
         self.assertIn("https://images.example.test/v1", prompts[0])
         self.assertIn("直接回车保留现有密钥", prompts[1])
+
+    def test_update_rewrites_saved_model_even_with_current_defaults_version(self) -> None:
+        for old_model, explicit_model in (
+            ("gpt-image-2", None),
+            ("custom-old-model", None),
+            ("gpt-image-2", "custom-requested-model"),
+        ):
+            with self.subTest(old_model=old_model, explicit_model=explicit_model):
+                with tempfile.TemporaryDirectory() as directory:
+                    codex_home = Path(directory) / "codex"
+                    config_path = codex_home / "sub2api-image" / "config.json"
+                    installer.install_skill(installer.SKILL_SOURCE, codex_home)
+                    installer.save_config(
+                        installer.Config(
+                            "https://images.example.test/v1",
+                            "existing-secret",
+                            model=old_model,
+                            output_dir="custom-output",
+                            timeout_seconds=321,
+                        ),
+                        config_path,
+                    )
+                    args = SimpleNamespace(
+                        base_url=None, codex_home=codex_home, config=config_path,
+                        reconfigure=False, model=explicit_model, output_dir=None,
+                        timeout=None, provider_profile=None,
+                    )
+                    with (
+                        patch.object(installer, "parse_args", return_value=args),
+                        patch.object(installer.sys.stdin, "isatty", return_value=True),
+                        patch("builtins.input", return_value="") as prompts,
+                        redirect_stdout(io.StringIO()),
+                    ):
+                        self.assertEqual(installer.main(), 0)
+                    updated = installer.load_config(config_path, apply_env=False)
+                    self.assertEqual(updated.model, explicit_model or installer.DEFAULT_MODEL)
+                    self.assertEqual(updated.base_url, "https://images.example.test/v1")
+                    self.assertEqual(updated.api_key, "existing-secret")
+                    self.assertEqual(updated.output_dir, "custom-output")
+                    self.assertEqual(updated.timeout_seconds, 321)
+                    self.assertEqual(prompts.call_count, 2)
 
     def test_prompt_config_requires_replacement_for_unreadable_key(self) -> None:
         failure = CredentialDecryptionError("unreadable")
@@ -255,7 +307,7 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(config.base_url, existing.base_url)
         self.assertEqual(config.api_key, "replacement-secret")
-        self.assertEqual(config.model, existing.model)
+        self.assertEqual(config.model, installer.DEFAULT_MODEL)
         self.assertEqual(config.output_dir, existing.output_dir)
         self.assertEqual(config.timeout_seconds, existing.timeout_seconds)
         self.assertEqual(config.provider_profile, existing.provider_profile)
