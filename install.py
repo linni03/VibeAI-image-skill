@@ -31,7 +31,9 @@ from image_client import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PROVIDER_PROFILE,
+    FALLBACK_MODEL,
     LEGACY_CONFIG_PATH,
+    PREFERRED_MODEL_FAMILY,
     SKILL_VERSION,
     Config,
     ConfigState,
@@ -40,7 +42,9 @@ from image_client import (  # noqa: E402
     config_from_mapping,
     default_config_path,
     discover_config_path,
+    is_auto_model,
     load_config,
+    migrated_base_url,
     migrated_timeout_seconds,
     read_config_state,
     save_config,
@@ -100,7 +104,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="兼容参数；安装器每次都会确认 Base URL 和 API Key",
     )
-    parser.add_argument("--model", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--model",
+        help="固定使用指定模型（默认 auto：自动选用上游最新 flare 模型）",
+    )
     parser.add_argument("--output-dir", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--provider-profile", help=argparse.SUPPRESS)
@@ -312,7 +319,11 @@ def prompt_config(
     input_fn: Callable[[str], str] = input,
     key_input_fn: Callable[[str], str] = input,
 ) -> Config:
-    default_base_url = existing.base_url if existing else DEFAULT_BASE_URL
+    if existing is None:
+        default_base_url = DEFAULT_BASE_URL
+    else:
+        # Enter on the old image-only default moves the install to the main gateway.
+        default_base_url, _ = migrated_base_url(existing.base_url)
     if base_url is None:
         entered_base_url = input_fn(f"Sub2API Base URL [{default_base_url}]: ").strip()
         selected_base_url = entered_base_url or default_base_url
@@ -399,7 +410,24 @@ def main() -> int:
         )
         if existing is not None and existing.api_key is not None:
             print("[INFO] 已读取现有配置；两项均可直接回车沿用。")
-        print(f"[INFO] 本次安装将模型配置更新为：{args.model or DEFAULT_MODEL}")
+        base_url_migrating = (
+            existing is not None
+            and args.base_url is None
+            and migrated_base_url(existing.base_url)[1]
+        )
+        if base_url_migrating:
+            print(
+                f"[INFO] 旧版默认生图入口 {existing.base_url} 不提供模型列表；"
+                f"直接回车将切换为 {DEFAULT_BASE_URL}"
+            )
+        selected_model = args.model or DEFAULT_MODEL
+        if is_auto_model(selected_model):
+            print(
+                f"[INFO] 本次安装将模型配置更新为：auto（每次请求前读取上游 /v1/models，"
+                f"自动选用最新的 {PREFERRED_MODEL_FAMILY} 模型；查询失败时使用 {FALLBACK_MODEL}）"
+            )
+        else:
+            print(f"[INFO] 本次安装将模型固定为：{selected_model}（不会自动切换）")
         config = prompt_config(
             existing,
             base_url=args.base_url,
@@ -444,6 +472,8 @@ def main() -> int:
         else:
             print("[OK] API Key 保护：配置文件权限 0600")
         print(f"[OK] Base URL: {config.base_url}")
+        if existing is not None and existing.base_url != config.base_url:
+            print(f"[OK] Base URL 已更新：{existing.base_url} -> {config.base_url}")
         print(f"[OK] 模型：{config.model}")
         if existing is not None and existing.model != config.model:
             print(f"[OK] 模型配置已更新：{existing.model} -> {config.model}")

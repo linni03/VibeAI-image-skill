@@ -2,7 +2,17 @@
 
 ## Known Behavior
 
-Sub2API can route OpenAI OAuth image accounts through native Images endpoints or a Responses image-generation bridge, depending on deployment and model. This skill defaults to the conservative `sub2api-openai-oauth` profile and `gpt-image-2.5-flare`. Do not infer image options from a Sub2API version string or a model listing; only verified request and returned-byte behavior belongs in this profile.
+Sub2API can route OpenAI OAuth image accounts through native Images endpoints or a Responses image-generation bridge, depending on deployment and model. This skill defaults to the conservative `sub2api-openai-oauth` profile and model `auto`. Do not infer sizes, presets, or other image options from a Sub2API version string or a model listing; only verified request and returned-byte behavior belongs in this profile.
+
+## Automatic Model Selection
+
+`auto` uses the model listing only to choose a model name:
+
+- Consider IDs shaped `gpt-image-<version>` or `gpt-image-<version>-<family>`. Chat models, Grok models, and dated snapshots such as `gpt-image-2.5-flare-2026-09-08` are ignored.
+- Compare versions numerically (`2.10` > `2.9`, `3` > `2.6`) and choose the highest version in the `flare` family. Other families, such as `sunburst`, are never auto-selected even when newer.
+- With no flare model in a successful listing, or with no listing and no cache, use the built-in fallback `gpt-image-2.5-flare`.
+
+Sub2API builds `/v1/models` from the key group's allowlist or the accounts' `model_mapping`, otherwise from its built-in defaults. A model appears to `auto` users as soon as the operator exposes it there, so operators should verify a new model with their own key first. Presets and other profile constraints still apply to every model.
 
 Keep these facts separate:
 

@@ -8,9 +8,16 @@ Use a Base URL ending in `/v1`. The client normalizes a bare origin and avoids d
 | --- | --- | --- |
 | Generate | `POST /v1/images/generations` | JSON |
 | Edit | `POST /v1/images/edits` | `multipart/form-data` |
+| Model discovery | `GET /v1/models` | none |
 | Ingress health | `GET /health` on the same origin | none |
 
+The default Base URL is `https://vibeai.tech/v1`. The retired image-only ingress `https://images.vibeai.tech/v1` serves only `/v1/images/*` and `/health`, so it cannot answer model discovery; installs still using it are moved to the main gateway on the next install or configure.
+
 Authenticate paid calls with a Sub2API image-enabled user key. The bundled client intentionally does not use async, task, batch, or billing-query routes because those contracts are not verified across supported deployments.
+
+## Model Discovery
+
+With model `auto`, generation and editing send one authenticated `GET /v1/models` before the paid request. It has a 10-second limit, uses no `client_version` query (which would select the Codex manifest format), and is not billed. The response must contain `data[]` items with string `id` values. Any discovery failure falls back to the last cached listing in `model-cache.json` beside the configuration, then to the built-in fallback; the failure is reported under `model_discovery` and never blocks or repeats the paid request. The cache stores only the Base URL, fetch time, and image model IDs. Dry runs never query the listing.
 
 ## OAuth Request Contract
 

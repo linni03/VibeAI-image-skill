@@ -24,6 +24,7 @@ from image_client import (
     config_from_mapping,
     discover_config_path,
     load_config,
+    migrated_base_url,
     migrated_timeout_seconds,
     print_json,
     public_error,
@@ -43,7 +44,13 @@ def parse_args() -> argparse.Namespace:
         help=f"Configuration path (default: {DEFAULT_CONFIG_PATH})",
     )
     parser.add_argument("--base-url", help="Sub2API base URL ending in /v1")
-    parser.add_argument("--model", help="Default image model")
+    parser.add_argument(
+        "--model",
+        help=(
+            "Image model: 'auto' selects the newest flare model listed by /v1/models "
+            "before each request; any other name pins that model"
+        ),
+    )
     parser.add_argument("--output-dir", help="Default image output directory")
     parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
     parser.add_argument(
@@ -119,9 +126,17 @@ def configure(
         args.timeout,
         defaults_version=existing.defaults_version if existing else None,
     )
+    base_url_migrated_from: str | None = None
+    if args.base_url:
+        selected_base_url = args.base_url
+    elif existing is not None:
+        selected_base_url, base_url_migrated = migrated_base_url(existing.base_url)
+        if base_url_migrated:
+            base_url_migrated_from = existing.base_url
+    else:
+        selected_base_url = DEFAULT_BASE_URL
     mapping = {
-        "base_url": args.base_url
-        or (existing.base_url if existing else DEFAULT_BASE_URL),
+        "base_url": selected_base_url,
         "api_key": api_key,
         "model": args.model or (existing.model if existing else DEFAULT_MODEL),
         "output_dir": args.output_dir
@@ -147,6 +162,9 @@ def configure(
     if timeout_migrated:
         result["timeout_migrated_from"] = 180
         result["timeout_migrated_to"] = DEFAULT_TIMEOUT_SECONDS
+    if base_url_migrated_from is not None:
+        result["base_url_migrated_from"] = base_url_migrated_from
+        result["base_url_migrated_to"] = config.base_url
     if existing_path != path and existing_path.exists():
         result["migrated_from"] = str(existing_path.resolve())
         result["legacy_config_retained"] = True

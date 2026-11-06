@@ -127,7 +127,12 @@ class SSEParserTests(unittest.TestCase):
 
 class StreamingGenerationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.config = Config("https://images.example.test/v1", "secret-test-key")
+        # Pinned so each test's single fake response is the image request.
+        self.config = Config(
+            "https://images.example.test/v1",
+            "secret-test-key",
+            model="gpt-image-pinned-test",
+        )
         self.encoded = base64.b64encode(make_png()).decode()
 
     def test_sse_generation_saves_final_image_with_one_request(self) -> None:

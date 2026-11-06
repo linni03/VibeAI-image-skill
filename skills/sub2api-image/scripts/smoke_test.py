@@ -9,7 +9,13 @@ import sys
 from pathlib import Path
 
 from generate import generate_images
-from image_client import DEFAULT_CONFIG_PATH, load_config, print_json, public_error
+from image_client import (
+    DEFAULT_CONFIG_PATH,
+    default_model_cache_path,
+    load_config,
+    print_json,
+    public_error,
+)
 
 
 SMOKE_PROMPT = "A simple blue geometric bird centered on a plain white background"
@@ -38,6 +44,7 @@ def main() -> int:
             count=1,
             output_format="png",
             output_dir=args.output_dir,
+            model_cache_path=default_model_cache_path(args.config),
         )
         report["smoke_test"] = True
         report["billing_verification"] = (

@@ -721,7 +721,14 @@ class SizeAndFormatTests(unittest.TestCase):
 
 class ClientIntegrationTests(unittest.TestCase):
     def config(self, server: MockServer) -> Config:
-        return Config(server.base_url, "secret-test-key", timeout_seconds=10)
+        # Pinned so transport tests see exactly one image request; auto
+        # discovery has its own tests in test_models.py.
+        return Config(
+            server.base_url,
+            "secret-test-key",
+            model="gpt-image-pinned-test",
+            timeout_seconds=10,
+        )
 
     def test_generation_json_auth_and_atomic_save(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:
@@ -796,6 +803,7 @@ class ClientIntegrationTests(unittest.TestCase):
         config = Config(
             "https://images.example.test/v1",
             "secret-test-key",
+            model="gpt-image-pinned-test",
             timeout_seconds=180,
         )
         with tempfile.TemporaryDirectory() as directory, patch(
@@ -952,7 +960,7 @@ class ClientIntegrationTests(unittest.TestCase):
             timeout_error = timeout.exception.as_dict()["error"]
             self.assertEqual(timeout_error["category"], "edge_timeout")
             self.assertFalse(timeout_error["retry_safe"])
-            self.assertIn("direct base URL", timeout_error["action"])
+            self.assertIn("configured base URL", timeout_error["action"])
 
     def test_edit_multipart_and_mask_validation(self) -> None:
         with MockServer() as server, tempfile.TemporaryDirectory() as directory:
