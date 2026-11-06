@@ -17,6 +17,7 @@ from image_client import (
     DEFAULT_PROGRESS_INTERVAL_SECONDS,
     Config,
     ConfigError,
+    default_model_cache_path,
     default_stream_for_profile,
     GenerationResult,
     ImageClient,
@@ -31,6 +32,7 @@ from image_client import (
     preflight_output_path,
     print_json,
     public_error,
+    resolve_model,
     response_client_request_id,
     resolve_size,
     safe_response_metadata,
@@ -307,6 +309,7 @@ def generate_images(
     dry_run: bool = False,
     metadata: Path | str | None = None,
     heartbeat_interval_seconds: float = DEFAULT_PROGRESS_INTERVAL_SECONDS,
+    model_cache_path: Path | str | None = None,
 ) -> dict[str, Any]:
     selected_count = validate_count(count, config.provider_profile)
     selected_output_format = select_output_format(output_format, output_path)
@@ -318,7 +321,8 @@ def generate_images(
     ) = normalize_options(
         selected_output_format, background, moderation, output_compression
     )
-    selected_model = validate_model(model or config.model)
+    if model:
+        validate_model(model)
     selected_prompt = validate_prompt(prompt)
     requested_size, requested_tier = resolve_size(
         tier,
@@ -346,6 +350,16 @@ def generate_images(
         if metadata_path in planned_outputs:
             raise ConfigError("Metadata path must differ from every output image path")
 
+    # Resolve the model after local validation and before the paid request.
+    # Dry runs never touch the network; they use the cache or the built-in fallback.
+    model_resolution = resolve_model(
+        selected_config,
+        model,
+        allow_network=not dry_run,
+        cache_path=model_cache_path,
+    )
+    selected_model = model_resolution.model
+
     payload: dict[str, Any] = {
         "model": selected_model,
         "prompt": selected_prompt,
@@ -369,7 +383,7 @@ def generate_images(
     base_report: dict[str, Any] = {
         "ok": True,
         "operation": "generate",
-        "model": selected_model,
+        **model_resolution.report_fields(),
         "requested_size": requested_size,
         "requested_tier": requested_tier,
         "requested_orientation": requested_orientation,
@@ -498,7 +512,10 @@ def parse_args() -> argparse.Namespace:
         default="square",
     )
     parser.add_argument("--size", help="auto or exact WIDTHxHEIGHT; overrides tier/orientation")
-    parser.add_argument("--model")
+    parser.add_argument(
+        "--model",
+        help="Image model; omit or pass 'auto' to use the configured/auto-selected model",
+    )
     parser.add_argument(
         "--n",
         type=int,
@@ -586,6 +603,7 @@ def main() -> int:
             stream=args.stream,
             dry_run=args.dry_run,
             metadata=args.metadata,
+            model_cache_path=default_model_cache_path(args.config),
         )
         print_json(report)
         return 0 if report["ok"] else 3

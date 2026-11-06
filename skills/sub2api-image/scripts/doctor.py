@@ -16,15 +16,20 @@ from image_client import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_TIMEOUT_SECONDS,
+    FALLBACK_MODEL,
+    PREFERRED_MODEL_FAMILY,
     default_stream_for_profile,
     ConfigError,
     ImageClient,
     SkillError,
     discover_config_path,
+    image_model_ids,
+    is_auto_model,
     load_config,
     max_images_per_request,
     public_error,
     read_config_state,
+    select_latest_image_model,
 )
 
 
@@ -65,11 +70,44 @@ def _codex_paths() -> dict[str, Any]:
     }
 
 
+def _models_check(config: Any, timeout_seconds: int) -> dict[str, Any]:
+    """List models once with the configured key; never sends an image request."""
+    report: dict[str, Any] = {
+        "endpoint": f"{config.base_url}/models",
+        "image_request_sent": False,
+        "billing_expected": False,
+        "authentication_checked": True,
+        "model_mode": "auto" if is_auto_model(config.model) else "pinned",
+        "preferred_family": PREFERRED_MODEL_FAMILY,
+    }
+    try:
+        listed = ImageClient(config).list_models(timeout_seconds=timeout_seconds)
+    except SkillError as exc:
+        report["ok"] = False
+        report["error"] = public_error(exc)["error"]
+        return report
+    available = image_model_ids(listed)
+    selected = select_latest_image_model(available)
+    report.update(
+        {
+            "ok": True,
+            "image_models": available,
+            "auto_selection": selected or FALLBACK_MODEL,
+            "auto_selection_source": "auto_discovered" if selected else "auto_builtin",
+        }
+    )
+    if not is_auto_model(config.model):
+        report["pinned_model"] = config.model
+        report["pinned_model_listed"] = config.model in listed
+    return report
+
+
 def run_doctor(
     *,
     config_path: Path | str | None = None,
     output_dir: Path | str | None = None,
     network: bool = False,
+    models: bool = False,
     network_timeout_seconds: int = 30,
 ) -> dict[str, Any]:
     if not 1 <= network_timeout_seconds <= 300:
@@ -108,6 +146,7 @@ def run_doctor(
             "base_url": config.base_url,
             "api_key": "<configured>",
             "model": config.model,
+            "model_mode": "auto" if is_auto_model(config.model) else "pinned",
             "timeout_seconds": config.timeout_seconds,
             "provider_profile": config.provider_profile,
             "default_stream": default_stream_for_profile(config.provider_profile),
@@ -164,6 +203,22 @@ def run_doctor(
     checks = [runtime["ok"], report["configuration"]["ok"], report["output"]["ok"]]
     if network:
         checks.append(report["network"]["ok"])
+    if models:
+        if config is None:
+            report["models"] = {
+                "ok": False,
+                "image_request_sent": False,
+                "billing_expected": False,
+                "error": {
+                    "category": "configuration",
+                    "message": "Model listing requires a readable configuration",
+                },
+            }
+        else:
+            report["models"] = _models_check(
+                config, min(config.timeout_seconds, network_timeout_seconds)
+            )
+        checks.append(report["models"]["ok"])
     report["ok"] = all(checks)
     return report
 
@@ -189,6 +244,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Check TLS and the /health ingress route without image billing",
     )
+    parser.add_argument(
+        "--models",
+        action="store_true",
+        help="List /v1/models with the configured key and show the auto selection (no image billing)",
+    )
     return parser.parse_args()
 
 
@@ -199,6 +259,7 @@ def main() -> int:
             config_path=args.config,
             output_dir=args.output_dir,
             network=args.network,
+            models=args.models,
             network_timeout_seconds=args.timeout,
         )
     except SkillError as exc:

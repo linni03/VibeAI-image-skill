@@ -30,14 +30,25 @@ from urllib.request import Request, urlopen
 from image_stream import ImageStreamState, SSEEventError, SSEImageParser, SSEParseError
 
 
-DEFAULT_BASE_URL = "https://images.vibeai.tech/v1"
-DEFAULT_MODEL = "gpt-image-2.5-flare"
+DEFAULT_BASE_URL = "https://vibeai.tech/v1"
+# The image-only ingress cannot serve /v1/models, so installs that still use
+# the old default are moved to the main gateway on the next install/configure.
+LEGACY_DEFAULT_BASE_URLS = frozenset({"https://images.vibeai.tech/v1"})
+MODEL_AUTO = "auto"
+DEFAULT_MODEL = MODEL_AUTO
+# Used only when auto selection has neither a live listing nor a usable cache.
+FALLBACK_MODEL = "gpt-image-2.5-flare"
+PREFERRED_MODEL_FAMILY = "flare"
+MODEL_DISCOVERY_TIMEOUT_SECONDS = 10
+MODEL_CACHE_FILENAME = "model-cache.json"
+MODEL_CACHE_SCHEMA_VERSION = 1
+MAX_MODELS_RESPONSE_BYTES = 4 * 1024 * 1024
 DEFAULT_OUTPUT_DIR = "generated_images"
 DEFAULT_TIMEOUT_SECONDS = 600
 LEGACY_DEFAULT_TIMEOUT_SECONDS = 180
 DEFAULT_PROGRESS_INTERVAL_SECONDS = 15
 DEFAULT_PROVIDER_PROFILE = "sub2api-openai-oauth"
-SKILL_VERSION = "1.7.1"
+SKILL_VERSION = "1.8.0"
 CONFIG_SCHEMA_VERSION = 2
 DEFAULT_TIMEOUT_MIGRATION_VERSION = (1, 7, 0)
 LEGACY_CONFIG_PATH = Path("~/.config/sub2api-image/config.json").expanduser()
@@ -312,7 +323,7 @@ class APIError(SkillError):
         elif self.status == 524:
             details["retry_safe"] = False
             details["action"] = (
-                "The paid request outcome is ambiguous. Check the image-only direct base URL, "
+                "The paid request outcome is ambiguous. Check the configured base URL, "
                 "Cloudflare/origin timeouts, and usage logs before approving a retry."
             )
         elif self.billing_ambiguous:
@@ -397,6 +408,7 @@ class Config:
             "base_url": self.base_url,
             "api_key": redact_key(self.api_key),
             "model": self.model,
+            "model_mode": "auto" if is_auto_model(self.model) else "pinned",
             "output_dir": self.output_dir,
             "timeout_seconds": self.timeout_seconds,
             "provider_profile": self.provider_profile,
@@ -512,7 +524,21 @@ def validate_model(value: str) -> str:
     model = value.strip()
     if not model or len(model) > 256 or any(ord(character) < 32 for character in model):
         raise ConfigError("Image model is empty or invalid")
+    if is_auto_model(model):
+        return MODEL_AUTO
     return model
+
+
+def is_auto_model(value: str | None) -> bool:
+    return isinstance(value, str) and value.strip().lower() == MODEL_AUTO
+
+
+def migrated_base_url(value: str) -> tuple[str, bool]:
+    """Move the retired image-only default to the main gateway default."""
+    normalized = normalize_base_url(value)
+    if normalized in LEGACY_DEFAULT_BASE_URLS:
+        return DEFAULT_BASE_URL, True
+    return normalized, False
 
 
 def validate_provider_profile(value: str) -> str:
@@ -1711,6 +1737,72 @@ class ImageClient:
             result["server_client_request_id"] = server_client_id
         return result
 
+    def list_models(
+        self, *, timeout_seconds: int = MODEL_DISCOVERY_TIMEOUT_SECONDS
+    ) -> list[str]:
+        """Return model IDs visible to this key from GET /v1/models (no billing)."""
+        client_request_id = new_client_request_id()
+        request = Request(
+            f"{self.config.base_url}/models",
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "User-Agent": USER_AGENT,
+                "X-Client-Request-Id": client_request_id,
+                "X-Request-ID": client_request_id,
+            },
+        )
+        selected_timeout = max(1, min(timeout_seconds, self.config.timeout_seconds))
+        headers: dict[str, str] = {}
+        try:
+            with urlopen(request, timeout=selected_timeout) as response:
+                headers = {key.lower(): value for key, value in response.headers.items()}
+                raw = _read_limited(response, MAX_MODELS_RESPONSE_BYTES)
+        except HTTPError as exc:
+            raw = _read_limited(exc, MAX_ERROR_BYTES)
+            headers = {key.lower(): value for key, value in exc.headers.items()}
+            message, error_type = _error_details(raw)
+            raise APIError(
+                redact_text(message, (self.config.api_key,)),
+                status=exc.code,
+                error_type=error_type,
+                request_id=_request_id(headers),
+                client_request_id=client_request_id,
+            ) from None
+        except (
+            http.client.HTTPException,
+            URLError,
+            socket.timeout,
+            TimeoutError,
+            OSError,
+        ) as exc:
+            raise _transport_api_error(
+                exc,
+                api_key=self.config.api_key,
+                headers=headers,
+                client_request_id=client_request_id,
+                billing_ambiguous=False,
+            ) from None
+
+        payload = _parse_json_response(raw, headers, client_request_id=client_request_id)
+        items = payload.get("data")
+        if not isinstance(items, list):
+            raise APIError(
+                "Sub2API model listing has no data[] array",
+                request_id=_request_id(headers),
+                client_request_id=client_request_id,
+            )
+        return [
+            item["id"].strip()
+            for item in items
+            if isinstance(item, Mapping)
+            and isinstance(item.get("id"), str)
+            and item["id"].strip()
+        ]
+
     def result_bytes(self, item: Mapping[str, Any]) -> bytes:
         encoded = item.get("b64_json")
         if isinstance(encoded, str) and encoded:
@@ -1752,6 +1844,200 @@ class ImageClient:
         if len(data) > MAX_IMAGE_BYTES:
             raise ImageValidationError("Image result exceeds the safe size limit")
         return data
+
+
+_IMAGE_MODEL_ID = re.compile(
+    r"gpt-image-(?P<version>\d+(?:\.\d+)*)(?:-(?P<family>[a-z][a-z0-9]*))?"
+)
+
+
+@dataclass(frozen=True)
+class ModelResolution:
+    """The model chosen for one request and where the choice came from.
+
+    Sources: cli, env, config (pinned), auto_discovered (live /v1/models),
+    auto_cached (last successful listing), auto_builtin (FALLBACK_MODEL).
+    """
+
+    model: str
+    source: str
+    discovery: dict[str, Any] | None = None
+
+    def report_fields(self) -> dict[str, Any]:
+        fields: dict[str, Any] = {"model": self.model, "model_source": self.source}
+        if self.discovery is not None:
+            fields["model_discovery"] = dict(self.discovery)
+        return fields
+
+
+def parse_image_model_id(model_id: str) -> tuple[tuple[int, ...], str] | None:
+    """Parse gpt-image-<version>[-<family>]; dated snapshots and other shapes return None."""
+    match = _IMAGE_MODEL_ID.fullmatch(model_id.strip().lower())
+    if match is None:
+        return None
+    version = tuple(int(part) for part in match.group("version").split("."))
+    while len(version) > 1 and version[-1] == 0:
+        version = version[:-1]
+    return version, match.group("family") or ""
+
+
+def image_model_ids(model_ids: Iterable[Any]) -> list[str]:
+    """Keep selectable image model IDs, dropping chat models and dated snapshots."""
+    selected: list[str] = []
+    seen: set[str] = set()
+    for model_id in model_ids:
+        if not isinstance(model_id, str):
+            continue
+        candidate = model_id.strip()
+        if candidate in seen or parse_image_model_id(candidate) is None:
+            continue
+        seen.add(candidate)
+        selected.append(candidate)
+    return selected
+
+
+def select_latest_image_model(
+    model_ids: Iterable[Any], *, family: str = PREFERRED_MODEL_FAMILY
+) -> str | None:
+    """Return the highest version in the preferred family, or None if absent."""
+    best: tuple[tuple[int, ...], str] | None = None
+    for model_id in image_model_ids(model_ids):
+        parsed = parse_image_model_id(model_id)
+        if parsed is None or parsed[1] != family:
+            continue
+        key = (parsed[0], model_id)
+        if best is None or key > best:
+            best = key
+    return best[1] if best is not None else None
+
+
+def default_model_cache_path(config_path: Path | str | None = None) -> Path:
+    return discover_config_path(config_path).parent / MODEL_CACHE_FILENAME
+
+
+def read_model_cache(
+    path: Path | str | None, base_url: str
+) -> tuple[list[str], str | None] | None:
+    """Return (image_models, fetched_at) from a cache for this base URL, else None."""
+    if path is None:
+        return None
+    try:
+        cache_path = Path(path).expanduser()
+        info = cache_path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_CONFIG_BYTES:
+            return None
+        document = json.loads(cache_path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if (
+        not isinstance(document, Mapping)
+        or document.get("schema_version") != MODEL_CACHE_SCHEMA_VERSION
+        or document.get("base_url") != base_url
+        or not isinstance(document.get("image_models"), list)
+    ):
+        return None
+    fetched_at = document.get("fetched_at")
+    return (
+        image_model_ids(document["image_models"]),
+        fetched_at if isinstance(fetched_at, str) else None,
+    )
+
+
+def write_model_cache(
+    path: Path | str | None, base_url: str, image_models: Sequence[str]
+) -> bool:
+    """Best-effort cache write; sandboxed or missing directories are skipped."""
+    if path is None:
+        return False
+    cache_path = Path(path).expanduser()
+    if not cache_path.parent.is_dir():
+        return False
+    payload = {
+        "schema_version": MODEL_CACHE_SCHEMA_VERSION,
+        "base_url": base_url,
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "image_models": list(image_models),
+    }
+    data = json.dumps(payload, ensure_ascii=True, indent=2).encode("utf-8") + b"\n"
+    try:
+        _atomic_write(cache_path, data)
+    except (SkillError, OSError):
+        return False
+    return True
+
+
+def _discovery_error(exc: SkillError) -> dict[str, Any]:
+    details = exc.as_dict().get("error", {})
+    return {
+        key: details[key]
+        for key in ("category", "status", "message", "request_id", "client_request_id")
+        if key in details
+    }
+
+
+def resolve_model(
+    config: Config,
+    requested_model: str | None = None,
+    *,
+    allow_network: bool = True,
+    cache_path: Path | str | None = None,
+    client: ImageClient | None = None,
+) -> ModelResolution:
+    """Choose the model for one request before any paid call is made.
+
+    Precedence: --model, SUB2API_IMAGE_MODEL, a pinned config model, then auto.
+    Auto queries /v1/models once, then falls back to the last cached listing,
+    then to FALLBACK_MODEL. Discovery failures never raise.
+    """
+    explicit = (requested_model or "").strip()
+    if explicit and not is_auto_model(explicit):
+        return ModelResolution(validate_model(explicit), "cli")
+    if not explicit:
+        configured = validate_model(config.model)
+        if not is_auto_model(configured):
+            environment_value = os.environ.get(CONFIG_ENV_VARS["model"], "").strip()
+            source = (
+                "env"
+                if environment_value and validate_model(environment_value) == configured
+                else "config"
+            )
+            return ModelResolution(configured, source)
+
+    discovery: dict[str, Any] = {
+        "endpoint": f"{config.base_url}/models",
+        "preferred_family": PREFERRED_MODEL_FAMILY,
+    }
+    if allow_network:
+        try:
+            listed = (client or ImageClient(config)).list_models()
+        except SkillError as exc:
+            discovery["status"] = "failed"
+            discovery["error"] = _discovery_error(exc)
+        else:
+            available = image_model_ids(listed)
+            discovery["status"] = "ok"
+            discovery["image_models"] = available
+            discovery["cache_written"] = write_model_cache(
+                cache_path, config.base_url, available
+            )
+            selected = select_latest_image_model(available)
+            if selected is not None:
+                return ModelResolution(selected, "auto_discovered", discovery)
+            discovery["reason"] = "no_preferred_family_model_listed"
+            return ModelResolution(FALLBACK_MODEL, "auto_builtin", discovery)
+    else:
+        discovery["status"] = "skipped_offline"
+
+    cached = read_model_cache(cache_path, config.base_url)
+    if cached is not None:
+        cached_models, fetched_at = cached
+        selected = select_latest_image_model(cached_models)
+        if selected is not None:
+            discovery["image_models"] = cached_models
+            discovery["cached_at"] = fetched_at
+            return ModelResolution(selected, "auto_cached", discovery)
+    discovery["reason"] = "no_usable_listing_or_cache"
+    return ModelResolution(FALLBACK_MODEL, "auto_builtin", discovery)
 
 
 def _file_mime_type(path: Path, data: bytes) -> str:

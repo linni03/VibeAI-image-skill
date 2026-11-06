@@ -16,10 +16,16 @@ Use the bundled standard-library Python clients against the configured Sub2API e
 5. Invoke each paid generation or edit with `--timeout 600`. Do not run a probe or dry run first unless the user explicitly requests no-cost validation or troubleshooting requires it.
 6. Preserve the complete structured command result and original `session_id`. Resume that same session at intervals of up to 15 seconds. Pending output, an absent file, or an outer `cell_id` completing without final client JSON is not a terminal result.
 7. Treat only an explicit client exit with final JSON as terminal. A deadline signal is not proof the underlying request stopped. Never start a replacement invocation while the original command may still be running.
-8. Inspect every saved final image when local image viewing is available. Report absolute paths, requested and actual dimensions, tier, format, server request IDs when present, and the always-present local `client_request_id`.
+8. Inspect every saved final image when local image viewing is available. Report absolute paths, requested and actual dimensions, tier, format, the `model` and `model_source` actually used, server request IDs when present, and the always-present local `client_request_id`.
 9. Treat false size, tier, orientation, count, or format matches as failure even if files were saved.
 
-Read [references/transport-and-billing.md](references/transport-and-billing.md) for TLS, EOF, timeout, sequential multi-output, and billing-ambiguity handling. Read [references/sub2api-api.md](references/sub2api-api.md) for the deployed wire contract. Read [references/model-capabilities.md](references/model-capabilities.md) before selecting custom sizes.
+Read [references/transport-and-billing.md](references/transport-and-billing.md) for TLS, EOF, timeout, sequential multi-output, and billing-ambiguity handling. Read [references/sub2api-api.md](references/sub2api-api.md) for the deployed wire contract. Read [references/model-capabilities.md](references/model-capabilities.md) before selecting custom sizes or a non-default model.
+
+## Model Selection
+
+The configured model defaults to `auto`. Before each paid generation or edit, the client queries `GET /v1/models` once (no billing, 10-second limit) and selects the highest-version `gpt-image-<version>-flare` model the key can see, skipping dated snapshots. When the listing fails, it reuses the last cached listing; when no usable listing or flare model exists, it uses the built-in fallback. Discovery never raises and never replaces a paid request.
+
+`--model NAME`, `SUB2API_IMAGE_MODEL`, or a pinned config model skips discovery. Pass `--model` only when the user explicitly names a model. Every result reports `model` and `model_source` (`cli`, `env`, `config`, `auto_discovered`, `auto_cached`, or `auto_builtin`); tell the user which model was used. Never switch to another model as a retry after a paid failure.
 
 ## Configure
 
@@ -71,6 +77,12 @@ Add `--network` only to check DNS, TLS, and the image ingress `/health` route. I
 <python> <skill-dir>/scripts/doctor.py --network
 ```
 
+Add `--models` to list `/v1/models` with the configured key and preview the model `auto` would select. It verifies key authorization, does not call an image endpoint, and does not incur image billing:
+
+```text
+<python> <skill-dir>/scripts/doctor.py --models
+```
+
 Use `generate.py --dry-run` only for explicit no-cost option validation. Run `smoke_test.py` only after the user authorizes a real paid 1K generation.
 
 ## Safety
@@ -79,6 +91,6 @@ Use `generate.py --dry-run` only for explicit no-cost option validation. Run `sm
 - Treat TLS/EOF/reset/timeout before a validated completed event as an ambiguous paid outcome. Report the `client_request_id` and do not tell the user a new request is free.
 - Keep a validated final image received before a later transport failure and report its transport warning. Partial images are diagnostics, never final output.
 - Do not continue a sequential multi-output job after an ambiguous request; report completed K of N outputs and the failed request's correlation details.
-- Never silently change model, size, tier, output count, quality, format, or other native options.
+- Never silently change size, tier, output count, quality, format, or other native options. The model may change only through the documented `auto` selection, and every result must report the model used.
 - Use only the bundled synchronous generation and edit clients. Do not invent or probe unimplemented async routes.
 - Keep returned images and remove only temporary files created during the current workflow.

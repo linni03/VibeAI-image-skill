@@ -1,6 +1,8 @@
 # VibeAI Sub2API 图像 Skill
 
-这是一个供 Codex 使用的图像生成与编辑 Skill，默认使用 Sub2API 的 OpenAI OAuth 图像账号桥接。安装并配置一次后，可以直接在 Codex 对话中描述图片需求，不需要手动调用接口或安装第三方 Python 包。当前 Skill 版本为 `1.7.1`。
+这是一个供 Codex 使用的图像生成与编辑 Skill，默认使用 Sub2API 的 OpenAI OAuth 图像账号桥接。安装并配置一次后，可以直接在 Codex 对话中描述图片需求，不需要手动调用接口或安装第三方 Python 包。当前 Skill 版本为 `1.8.0`。
+
+从 `1.8.0` 起，默认模型为 `auto`：每次生图或编辑前，Skill 会读取上游 `/v1/models`，自动选用最新的 `flare` 模型（当前为 `gpt-image-2.6-flare`）。上游新增模型后不需要再更新本仓库或重新安装，详见下方“自动选择模型”。
 
 ![VibeAI Sub2API 图像 Skill 安装流程](docs/assets/vibeai-image-skill-tutorial.png)
 
@@ -32,9 +34,9 @@ cd vibeai-image-skill
 
 Windows 原生环境会使用机器作用域 DPAPI 加密 API Key，使 Codex `elevated` 沙箱使用的专用低权限用户也能解密。配置保存在 `%CODEX_HOME%\sub2api-image\config.json`；未设置 `CODEX_HOME` 时使用 `%USERPROFILE%\.codex\sub2api-image\config.json`。配置文件中不会保存明文 Key，机密性同时依赖用户目录的 Windows ACL；不要把配置复制到共享目录。
 
-从旧版本更新时，安装器会兼容旧的当前用户 DPAPI 配置，并读取 `%USERPROFILE%\.config\sub2api-image\config.json` 后写入新位置。旧 Key 可解时会自动迁移；确实无法解密时，安装器会保留 Base URL、输出目录和超时设置，将模型更新为当前版本默认值，并要求输入替换 Key。旧路径文件会暂时保留，确认新版正常后可以手动删除。
+从旧版本更新时，安装器会兼容旧的当前用户 DPAPI 配置，并读取 `%USERPROFILE%\.config\sub2api-image\config.json` 后写入新位置。旧 Key 可解时会自动迁移；确实无法解密时，安装器会保留 Base URL、输出目录和超时设置，将模型更新为 `auto`，并要求输入替换 Key。旧路径文件会暂时保留，确认新版正常后可以手动删除。
 
-已经安装且配置可读时，重新双击 `install.bat` 会先显示现有 Base URL 供确认，再询问 API Key。两项都直接回车会沿用现有 Base URL 和 API Key，模型配置仍会更新为当前版本默认值；也可以当场输入新的 Base URL 或 Key。确认后安装器覆盖更新 Skill，并明确显示“更新完成”。旧版默认的 180 秒超时会安全迁移到 600 秒；用户明确设置的其他超时保持不变。
+已经安装且配置可读时，重新双击 `install.bat` 会先显示现有 Base URL 供确认，再询问 API Key。两项都直接回车会沿用现有 Base URL 和 API Key，模型配置会更新为 `auto`；也可以当场输入新的 Base URL 或 Key。如果现有 Base URL 是旧版默认的 `https://images.vibeai.tech/v1`，方括号中的默认值会显示为新地址 `https://vibeai.tech/v1`，直接回车即完成切换。确认后安装器覆盖更新 Skill，并明确显示“更新完成”。旧版默认的 180 秒超时会安全迁移到 600 秒；用户明确设置的其他超时保持不变。
 
 ## macOS、Linux 和 WSL2 安装
 
@@ -51,7 +53,7 @@ sh install.sh
 安装器自动识别 Windows 原生、WSL、macOS 或 Linux，并显示实际使用的 Python、Codex Home、Skill 路径和配置路径。首次安装和后续更新都会依次确认：
 
 ```text
-Sub2API Base URL [https://images.vibeai.tech/v1]:
+Sub2API Base URL [https://vibeai.tech/v1]:
 Sub2API 生图 API Key（输入可见）:
 ```
 
@@ -59,6 +61,7 @@ Sub2API 生图 API Key（输入可见）:
 - 使用其他 Sub2API 地址：输入地址后按回车
 - API Key 输入内容会在终端中显示，便于确认输入或粘贴是否成功；请确保周围无人查看终端
 - 新配置和未声明 profile 的旧配置都使用 `sub2api-openai-oauth`；生成默认使用零预览 SSE，编辑默认使用非流式 JSON
+- 模型默认写入 `auto`，安装过程不会联网查询模型；首次生图时才读取 `/v1/models`
 - 已经配置且旧 Key 可以读取时，可以直接按回车保留现有 Key
 - 重复安装时，Base URL 直接回车沿用方括号中的现有值，API Key 直接回车保留现有密钥；输入新值即可在本次更新中替换
 - 如果提示旧 Key 无法解密，必须输入替换 Key；空回车不会覆盖原配置
@@ -92,6 +95,12 @@ python3 ~/.codex/skills/sub2api-image/scripts/doctor.py
 ```
 
 诊断会检查 Python、配置位置、密钥是否可读取、输出目录权限，以及 Codex 配置和沙箱日志位置。需要检查 DNS、TLS 和图片入口连通性时再加 `--network`；该选项只请求同源 `/health`，不会发送生图请求或产生生图费用，也不会把健康检查误报为 API Key 认证成功。诊断输出不会包含 API Key。
+
+想确认 Key 能看到哪些模型、`auto` 会选哪个时，加 `--models`。它会用配置中的 Key 请求一次 `/v1/models`，同时验证 Key 是否有效；不会发送生图请求，也不产生生图费用：
+
+```bash
+python3 ~/.codex/skills/sub2api-image/scripts/doctor.py --models
+```
 
 ## Windows 一次性 Codex 权限设置
 
@@ -127,6 +136,26 @@ writable_roots = ['C:\Users\YOUR-NAME\Pictures']
 ```
 
 新配置迁移到 `%CODEX_HOME%` 后不再需要这条旧路径读取规则。
+
+## 自动选择模型
+
+配置中的 `model` 默认为 `auto`。每次生图或编辑前，Skill 会用你的 Key 请求一次 `/v1/models`（不计费，最多等 10 秒），按以下规则选模型：
+
+- 只看 `gpt-image-<版本号>` 或 `gpt-image-<版本号>-<系列>` 形式的模型，忽略聊天模型和 `-2026-09-08` 这类日期快照。
+- 版本号按数字比较（`2.10` 高于 `2.9`），在 `flare` 系列中选最高版本。`sunburst` 等其他系列即使版本更高也不会被自动选中。
+- 查询失败时使用上一次成功查询的缓存（配置目录下的 `model-cache.json`，只记录模型名和时间，不含 Key）；没有缓存，或上游列表里没有 flare 模型时，使用内置的 `gpt-image-2.5-flare`。
+
+每次结果 JSON 都会包含 `model` 和 `model_source`，Codex 会告诉你实际用了哪个模型。`model_source` 为 `auto_discovered` 表示刚从上游查到，`auto_cached` 表示用的是缓存，`auto_builtin` 表示用的是内置默认值。
+
+不想自动切换时可以固定模型，优先级从高到低：
+
+1. 对话中明确指定模型，例如“用 gpt-image-2.5-flare 生成……”
+2. 环境变量 `SUB2API_IMAGE_MODEL`
+3. 安装时传入 `--model 模型名`，或运行 `configure.py --model 模型名`
+
+改回自动模式：重新运行安装器（不带 `--model`），或运行 `configure.py --model auto`。
+
+上游新增的模型需要先出现在你这个 Key 所属分组的 `/v1/models` 里，才会被自动选中。
 
 ## 在 Codex 中使用
 
@@ -172,7 +201,9 @@ git pull
 .\install.bat
 ```
 
-安装器会先让用户确认 Base URL 和 API Key，再暂存、校验并原子替换 `%CODEX_HOME%\skills\sub2api-image`。两项直接回车会保留现有值，输入新值则立即替换；旧脚本和残留文件会被清除，Skill 目录之外的配置不会被删除，但配置文件中的 `model` 每次都会同步为当前版本默认模型（当前为 `gpt-image-2.5-flare`），即使之前保存的是自定义模型。若要在本次安装中指定其他模型，可传入 `--model 模型名`。输出目录和 Provider profile 保留现有设置。旧版默认 180 秒超时自动迁移为 600 秒，并在结束时显示“更新完成”。Windows 旧版的 `windows-dpapi-current-user` 配置会在这一步迁移为 `windows-dpapi-local-machine`。
+安装器会先让用户确认 Base URL 和 API Key，再暂存、校验并原子替换 `%CODEX_HOME%\skills\sub2api-image`。两项直接回车会保留现有值，输入新值则立即替换；旧脚本和残留文件会被清除，Skill 目录之外的配置不会被删除，但配置文件中的 `model` 每次都会重置为 `auto`，即使之前保存的是自定义模型。若要在本次安装中固定其他模型，可传入 `--model 模型名`。输出目录和 Provider profile 保留现有设置。旧版默认 Base URL `https://images.vibeai.tech/v1` 会迁移为 `https://vibeai.tech/v1`，自定义地址保持不变。旧版默认 180 秒超时自动迁移为 600 秒，并在结束时显示“更新完成”。Windows 旧版的 `windows-dpapi-current-user` 配置会在这一步迁移为 `windows-dpapi-local-machine`。
+
+从 `1.8.0` 起，上游新增模型不再需要执行这一步；只有 Skill 本身的功能更新（例如新增尺寸预设）才需要 `git pull` 后重新安装。
 
 macOS、Linux 或 WSL2：
 
@@ -181,7 +212,7 @@ git pull
 sh install.sh
 ```
 
-macOS、Linux 和 WSL2 使用相同的两项确认流程：直接回车沿用，输入新值替换；随后原子覆盖 Skill，并同步更新配置文件中的默认模型，成功后显示“更新完成”和模型变更。更新后请重启 Codex 或新建会话。
+macOS、Linux 和 WSL2 使用相同的两项确认流程：直接回车沿用，输入新值替换；随后原子覆盖 Skill，并把配置文件中的模型重置为 `auto`，成功后显示“更新完成”和模型变更。更新后请重启 Codex 或新建会话。
 
 ## 常见问题
 
@@ -195,4 +226,5 @@ macOS、Linux 和 WSL2 使用相同的两项确认流程：直接回车沿用，
 - **出现 `SSL: UNEXPECTED_EOF_WHILE_READING`**：先运行 `doctor.py --network` 检查同一图片入口的 DNS、TLS 和 `/health`，再按错误里的 `client_request_id` 检查 Sub2API、反向代理和使用记录。最终完成事件之前断开时计费状态不明确，不要直接重试；改成非流式也不能证明上一笔请求未计费。
 - **一次要求多张却只返回一张**：OAuth profile 不再发送 `n>1`。请明确要求多个独立输出，Codex 会按顺序逐张请求；任一请求异常后会停止，不会继续扩大潜在费用。
 - **API Key 是否安全**：Windows 使用机器作用域 DPAPI 加密，并依赖用户目录 ACL 限制密文读取；同一台机器上能读取该配置文件的账户也能解密，因此不要移动到共享目录。macOS、Linux 和 WSL2 使用 `0600` 配置文件。不要把 Key 粘贴到 Codex 对话、命令参数、URL、Git 仓库或日志里。
-- **是否会产生费用**：安装和配置不会产生费用；只有实际生成或编辑图片时才会消耗 Sub2API 额度。
+- **是否会产生费用**：安装和配置不会产生费用；只有实际生成或编辑图片时才会消耗 Sub2API 额度。`auto` 模式每次请求前的 `/v1/models` 查询不计费。
+- **新模型上线后为什么没切换**：先运行 `doctor.py --models`，看 `image_models` 里是否已有新模型、`auto_selection` 是什么。不在列表里说明上游还没有对你的 Key 开放；`model_mode` 为 `pinned` 说明模型被固定了，运行 `configure.py --model auto` 改回自动；同时检查是否设置了环境变量 `SUB2API_IMAGE_MODEL`。
