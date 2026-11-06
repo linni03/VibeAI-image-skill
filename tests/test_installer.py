@@ -35,7 +35,9 @@ class InstallerTests(unittest.TestCase):
 
     def test_fresh_install_and_update_replace_the_skill_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            codex_home = Path(directory) / "codex"
+            # install_skill resolves the path; Windows runners give TEMP as an
+            # 8.3 short name (RUNNER~1), so resolve before comparing.
+            codex_home = Path(directory).resolve() / "codex"
             first = installer.install_skill(installer.SKILL_SOURCE, codex_home)
             target = codex_home / "skills" / installer.SKILL_NAME
 
